@@ -1,0 +1,5 @@
+node_modules
+dist-electron
+.git
+python/__pycache__
+*.pyc
