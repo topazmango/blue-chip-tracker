@@ -1,0 +1,8 @@
+# Railway deploy config for Blue Chip Tracker Python API
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python3 python/server.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
