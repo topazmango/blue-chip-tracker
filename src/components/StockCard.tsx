@@ -10,6 +10,17 @@ function fmt(n: number) {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function fmtTime(ts: number): string {
+  // ts is a Unix timestamp in seconds (ET market time from yfinance)
+  return new Date(ts * 1000).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'America/New_York',
+  });
+}
+
 export default function StockCard({ stock, selected, onClick }: Props) {
   const isUp = stock.change_pct > 0;
   const isDown = stock.change_pct < 0;
@@ -31,7 +42,7 @@ export default function StockCard({ stock, selected, onClick }: Props) {
       onMouseEnter={e => { if (!selected) e.currentTarget.style.backgroundColor = '#1a1e2a'; }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.backgroundColor = 'transparent'; }}
     >
-      {/* Ticker + name */}
+      {/* Ticker + name + timestamp */}
       <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold tracking-wide truncate" style={{ color: selected ? '#d1d4dc' : '#b2b5be' }}>
           {stock.ticker}
@@ -39,9 +50,14 @@ export default function StockCard({ stock, selected, onClick }: Props) {
         <div className="text-[10px] truncate mt-0.5" style={{ color: '#4c525e' }}>
           {stock.name}
         </div>
+        {stock.quote_time != null && (
+          <div className="text-[9px] tabular-nums mt-0.5" style={{ color: '#363a45' }}>
+            {fmtTime(stock.quote_time)} ET
+          </div>
+        )}
       </div>
 
-      {/* Price + change (+ optional extended hours line) */}
+      {/* Price + change + optional extended hours */}
       <div className="text-right flex-shrink-0 ml-2">
         <div className="text-xs font-medium tabular-nums" style={{ color: '#d1d4dc' }}>
           {stock.price === 0 ? '—' : `$${fmt(stock.price)}`}
@@ -49,7 +65,6 @@ export default function StockCard({ stock, selected, onClick }: Props) {
         <div className="text-[10px] tabular-nums font-medium mt-0.5" style={{ color: changeColor }}>
           {stock.change_pct >= 0 ? '+' : ''}{stock.change_pct.toFixed(2)}%
         </div>
-        {/* Extended hours row */}
         {hasExt && (
           <div className="flex items-center justify-end gap-1 mt-0.5">
             <span className="text-[9px] font-semibold px-1 rounded" style={{ backgroundColor: '#1e222d', color: extLabel }}>

@@ -9,6 +9,8 @@ export interface StockInfo {
   volume: number;
   day_high: number;
   day_low: number;
+  // Unix timestamp (seconds) of the most recent quote tick
+  quote_time?: number | null;
   // Extended hours (populated by useRealtimeQuotes, absent on initial /stocks load)
   ext_price?: number | null;
   ext_change_pct?: number | null;

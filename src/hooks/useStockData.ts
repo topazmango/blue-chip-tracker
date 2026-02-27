@@ -149,6 +149,7 @@ export function useRealtimeQuotes(
             day_high:       q.day_high,
             day_low:        q.day_low,
             volume:         q.volume,
+            quote_time:     q.last_candle?.time ?? null,
             ext_price:      q.ext_price,
             ext_change_pct: q.ext_change_pct,
             ext_session:    q.ext_session,
