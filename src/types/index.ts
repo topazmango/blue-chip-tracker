@@ -142,6 +142,17 @@ export interface EquityPoint {
   value: number;
 }
 
+/** A single completed trade from the backtester */
+export interface Trade {
+  ticker: string;
+  entry_date: string;   // 'YYYY-MM-DD'
+  exit_date: string;    // 'YYYY-MM-DD'
+  entry_price: number;
+  exit_price: number;
+  pnl: number;
+  pnl_pct: number;
+}
+
 /** One walk-forward fold result */
 export interface FoldResult {
   fold: number;
@@ -158,6 +169,7 @@ export interface FoldResult {
   os_trades: number;
   os_benchmark_return: number;
   equity_curve: EquityPoint[];
+  trades: Trade[];
 }
 
 /** Full walk-forward backtest report — returned by GET /backtest/{strategy} */

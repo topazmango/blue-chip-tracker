@@ -278,7 +278,7 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
         )}
       </div>
 
-      {/* ── Chart area (relative so BacktestDrawer can position absolutely) ── */}
+      {/* ── Chart area ── */}
       <div className="flex-1 relative min-h-0">
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center z-10" style={{ backgroundColor: '#13172290' }}>
@@ -325,16 +325,16 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
             <p className="text-xs" style={{ color: '#4c525e' }}>No data available</p>
           </div>
         )}
-
-        {/* Backtest slide-out drawer — rendered inside the chart area */}
-        {inQuantUniverse && (
-          <BacktestDrawer
-            ticker={stock.ticker}
-            open={showBacktest}
-            onClose={() => setShowBacktest(false)}
-          />
-        )}
       </div>
+
+      {/* Backtest full-screen modal — rendered at component root so it can cover everything */}
+      {inQuantUniverse && (
+        <BacktestDrawer
+          ticker={stock.ticker}
+          open={showBacktest}
+          onClose={() => setShowBacktest(false)}
+        />
+      )}
     </div>
   );
 }

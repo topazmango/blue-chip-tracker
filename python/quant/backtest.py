@@ -159,8 +159,10 @@ def _run_portfolio(
     cash        = START_CASH
     holdings: dict[str, float] = {}   # ticker → number of shares held
     entry_price: dict[str, float] = {}
+    entry_date:  dict[str, str]   = {}  # ticker → entry date string
     equity_curve: list[dict] = []
     trade_pnls: list[float] = []
+    trades: list[dict] = []             # full trade log
     dates = date_index.tolist()
 
     for i, dt in enumerate(dates):
@@ -206,10 +208,21 @@ def _run_portfolio(
             fill  = next_open[t]
             shares = holdings.pop(t)
             entry_px = entry_price.pop(t, fill)
+            entry_dt = entry_date.pop(t, next_dt.strftime("%Y-%m-%d"))
             gross  = shares * fill
             cost   = gross * COST_PCT
             cash  += gross - cost
-            trade_pnls.append(gross - shares * entry_px - cost)
+            pnl    = gross - shares * entry_px - cost
+            trade_pnls.append(pnl)
+            trades.append({
+                "ticker":     t,
+                "entry_date": entry_dt,
+                "exit_date":  next_dt.strftime("%Y-%m-%d"),
+                "entry_price": round(entry_px, 2),
+                "exit_price":  round(fill, 2),
+                "pnl":         round(pnl, 2),
+                "pnl_pct":     round((fill / entry_px - 1) * 100, 2) if entry_px > 0 else 0.0,
+            })
 
         # Execute entries at next open
         n_active = len(holdings) + len(enter)
@@ -225,6 +238,7 @@ def _run_portfolio(
             shares     = invest / fill
             holdings[t]    = shares
             entry_price[t] = fill
+            entry_date[t]  = next_dt.strftime("%Y-%m-%d")
             cash          -= alloc_each
 
     equity_vals = np.array([e["value"] for e in equity_curve], dtype=float)
@@ -236,6 +250,7 @@ def _run_portfolio(
         "daily_returns": daily_ret,
         "trade_pnls":    trade_pnls,
         "n_trades":      len(trade_pnls),
+        "trades":        trades,
     }
 
 
@@ -307,6 +322,7 @@ def _walk_forward(
             "os_trades":           os_result["n_trades"],
             "os_benchmark_return": round(spy_ret, 4),
             "equity_curve":        os_result["equity_curve"],
+            "trades":              os_result["trades"],
         })
 
         cur_is_start += pd.DateOffset(years=FOLD_STEP_YEARS)
