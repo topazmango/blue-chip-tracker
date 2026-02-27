@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import type { StockInfo, Timeframe, IndicatorSettings, Candle, ChartType, DrawingTool, ChartActions, PriceAlert } from '../types';
 import { useStockHistory, useEarnings, useSpyHistory, useStockMeta } from '../hooks/useStockData';
 import ChartPane from './ChartPane';
@@ -31,6 +31,59 @@ function fmtLarge(n: number) {
   return n.toString();
 }
 
+/** Visual tick-rate indicator.
+ *  Shows a pulsing dot + a decaying arc/bar that refills on each new tick,
+ *  giving an intuitive sense of how fast/fresh the price updates are.
+ */
+function TickCamera({ tickAge, pollMs }: { tickAge: number; pollMs: number }) {
+  // freshness: 1.0 = just updated, 0.0 = full interval elapsed
+  const freshness = Math.max(0, 1 - tickAge / pollMs);
+
+  // Color transitions green → amber → red as data goes stale
+  const r = freshness > 0.5
+    ? Math.round(38 + (239 - 38) * (1 - freshness) * 2)   // 38→239 in upper half
+    : 239;
+  const g = freshness > 0.5
+    ? 166
+    : Math.round(166 * freshness * 2);                     // 166→0 in lower half
+  const dotColor = `rgb(${r},${g},83)`;
+
+  // seconds-ago label
+  const secsAgo = Math.round(tickAge / 1000);
+  const label = tickAge < 800 ? 'NOW' : `${secsAgo}s ago`;
+
+  // Arc SVG: a thin ring that drains clockwise as the tick ages
+  const SIZE = 14;
+  const R = 5.5;
+  const circ = 2 * Math.PI * R;
+  const dash = freshness * circ;
+
+  return (
+    <span
+      className="flex items-center gap-1 text-[10px] tabular-nums"
+      title={`Live price feed — last tick ${label} · updates every ${pollMs / 1000}s`}
+      style={{ color: dotColor }}
+    >
+      {/* Circular progress arc */}
+      <svg width={SIZE} height={SIZE} style={{ flexShrink: 0, transform: 'rotate(-90deg)' }}>
+        {/* track */}
+        <circle cx={SIZE / 2} cy={SIZE / 2} r={R} fill="none" stroke="#2a2e39" strokeWidth="1.8" />
+        {/* fill arc */}
+        <circle
+          cx={SIZE / 2} cy={SIZE / 2} r={R}
+          fill="none"
+          stroke={dotColor}
+          strokeWidth="1.8"
+          strokeDasharray={`${dash} ${circ}`}
+          strokeLinecap="round"
+          style={{ transition: 'stroke-dasharray 0.1s linear, stroke 0.2s' }}
+        />
+      </svg>
+      LIVE&nbsp;{label}
+    </span>
+  );
+}
+
 export default function StockChart({ stock, liveCandle, isLive, chartType, activeTool, onToolChange, chartActionsRef, alerts, onAlertAdd, onAlertTriggered }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>('3M');
   const [indicators, setIndicators] = useState<IndicatorSettings>({
@@ -48,6 +101,28 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
     const mutableRef = chartActionsRef as { current: ChartActions | null };
     mutableRef.current = actions;
   };
+
+  // Track when the last tick arrived so we can show update freshness
+  const [tickAge, setTickAge] = useState<number>(0);        // ms since last tick
+  const lastTickRef = useRef<number>(0);
+  const POLL_MS = 5000;
+
+  // Flash on every new liveCandle
+  useEffect(() => {
+    if (!liveCandle) return;
+    lastTickRef.current = performance.now();
+    setTickAge(0);
+  }, [liveCandle]);
+
+  // Fast counter to animate decay between ticks
+  useEffect(() => {
+    if (!isLive) return;
+    const id = setInterval(() => {
+      const age = performance.now() - lastTickRef.current;
+      setTickAge(Math.min(age, POLL_MS));
+    }, 100);
+    return () => clearInterval(id);
+  }, [isLive]);
 
   const { history, loading, error } = useStockHistory(stock?.ticker ?? null, timeframe);
   const spyCandles  = useSpyHistory(timeframe);
@@ -90,10 +165,7 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
             {stock.sector}
           </span>
           {isLive && (
-            <span className="flex items-center gap-1 text-[10px]" style={{ color: '#26a69a' }}>
-              <span className="live-dot" />
-              LIVE
-            </span>
+            <TickCamera tickAge={tickAge} pollMs={POLL_MS} />
           )}
         </div>
 
