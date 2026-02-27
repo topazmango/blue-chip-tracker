@@ -106,7 +106,30 @@ MARKET_CLOSE = dtime(16, 0)
 # Tracks the last time (monotonic) each ticker fired a Discord alert this session
 _last_alert_sent: dict[str, float] = {}
 
-_executor = ThreadPoolExecutor(max_workers=2)
+_executor = ThreadPoolExecutor(max_workers=6)
+
+# ── Shared /quotes TTL cache (10 s) ───────────────────────────────────────────
+# Prevents thundering-herd when get_quotes(), _alert_loop(), and
+# _send_hourly_movers() all call _fetch_quotes_sync() at the same time.
+_quotes_cache: Optional[tuple[float, dict]] = None
+_QUOTES_TTL = 10.0
+
+
+def _get_cached_quotes() -> dict:
+    """
+    Return cached quote results if fresh, otherwise fetch and cache.
+    Shared by get_quotes(), _alert_loop(), and _send_hourly_movers()
+    so a burst of simultaneous callers only hits yfinance once per 10 s.
+    """
+    global _quotes_cache
+    now = time.monotonic()
+    if _quotes_cache is not None:
+        ts, data = _quotes_cache
+        if now - ts < _QUOTES_TTL:
+            return data
+    data = _fetch_quotes_sync()
+    _quotes_cache = (now, data)
+    return data
 
 
 def _is_market_open() -> bool:
@@ -121,9 +144,10 @@ def _fetch_quotes_sync() -> dict:
     """
     Fetch 1-minute data for all 30 tickers and compute intraday change %.
     Runs in a thread pool to avoid blocking the event loop.
-    Returns dict keyed by ticker: {price, prev_close, change_pct, name, sector}
+    Returns dict keyed by ticker with full quote shape (same as /quotes endpoint).
     """
     tickers = [s["ticker"] for s in DEFAULT_STOCKS]
+    et = pytz.timezone('America/New_York')
     try:
         data = yf.download(
             tickers,
@@ -131,11 +155,12 @@ def _fetch_quotes_sync() -> dict:
             interval="1m",
             group_by="ticker",
             auto_adjust=True,
+            prepost=True,
             progress=False,
             threads=True,
         )
     except Exception as e:
-        logger.error(f"Alert poller fetch failed: {e}")
+        logger.error(f"_fetch_quotes_sync failed: {e}")
         return {}
 
     results: dict = {}
@@ -143,29 +168,87 @@ def _fetch_quotes_sync() -> dict:
         ticker = stock["ticker"]
         try:
             td = data[ticker] if len(tickers) > 1 else data
-            closes = td["Close"].dropna()
-            if len(closes) == 0:
+            td = td.dropna(subset=["Close"])
+            if len(td) == 0:
                 continue
 
-            price = float(closes.iloc[-1])
+            # Partition rows by ET session
+            reg_rows: list  = []
+            pre_rows: list  = []
+            post_rows: list = []
+            for ts, row in td.iterrows():
+                ts_et = ts.astimezone(et)
+                t = ts_et.time()
+                if dtime(9, 30) <= t < dtime(16, 0):
+                    reg_rows.append(row)
+                elif dtime(4, 0) <= t < dtime(9, 30):
+                    pre_rows.append(row)
+                else:
+                    post_rows.append(row)
 
-            # prev_close: last close from a prior calendar day (ET)
-            idx = closes.index
-            today_et = idx[-1].astimezone(ET).date()
-            prev_closes = closes[[i.astimezone(ET).date() < today_et for i in idx]]
-            prev_close = float(prev_closes.iloc[-1]) if len(prev_closes) > 0 else price
+            # Regular session close
+            if reg_rows:
+                reg_close = float(reg_rows[-1]["Close"])
+                reg_high  = float(max(r["High"]  for r in reg_rows))
+                reg_low   = float(min(r["Low"]   for r in reg_rows))
+                reg_vol   = int(sum(r["Volume"]  for r in reg_rows if not pd.isna(r["Volume"])))
+            else:
+                reg_close = float(td["Close"].iloc[-1])
+                reg_high  = reg_close
+                reg_low   = reg_close
+                reg_vol   = 0
 
-            change_pct = ((price - prev_close) / prev_close * 100) if prev_close != 0 else 0.0
+            # prev_close: last bar from a previous calendar day
+            today_date = td.index[-1].astimezone(et).date()
+            prev_bars = [row for ts, row in td.iterrows() if ts.astimezone(et).date() < today_date]
+            prev_close = float(prev_bars[-1]["Close"]) if prev_bars else reg_close
+
+            # Extended hours
+            ext_price: Optional[float] = None
+            ext_change_pct: Optional[float] = None
+            ext_session: Optional[str] = None
+            if post_rows:
+                ext_price = float(post_rows[-1]["Close"])
+                ext_change_pct = round((ext_price - reg_close) / reg_close * 100, 4) if reg_close else None
+                ext_session = "POST"
+            elif pre_rows:
+                ext_price = float(pre_rows[-1]["Close"])
+                ext_change_pct = round((ext_price - prev_close) / prev_close * 100, 4) if prev_close else None
+                ext_session = "PRE"
+
+            change     = reg_close - prev_close
+            change_pct = (change / prev_close * 100) if prev_close != 0 else 0.0
+
+            # Last minute-candle (incl. extended) for chart update
+            last_row = td.iloc[-1]
+            last_ts  = int(last_row.name.timestamp())
 
             results[ticker] = {
-                "name":       stock["name"],
-                "sector":     stock["sector"],
-                "price":      round(price, 2),
-                "prev_close": round(prev_close, 2),
-                "change_pct": round(change_pct, 4),
+                # Alert-poller fields
+                "name":           stock["name"],
+                "sector":         stock["sector"],
+                # Full /quotes fields
+                "price":          round(reg_close, 2),
+                "prev_close":     round(prev_close, 2),
+                "change":         round(change, 2),
+                "change_pct":     round(change_pct, 4),
+                "day_high":       round(reg_high, 2),
+                "day_low":        round(reg_low, 2),
+                "volume":         reg_vol,
+                "ext_price":      round(ext_price, 2) if ext_price is not None else None,
+                "ext_change_pct": ext_change_pct,
+                "ext_session":    ext_session,
+                "last_candle": {
+                    "time":   last_ts,
+                    "open":   round(float(last_row["Open"]),  2),
+                    "high":   round(float(last_row["High"]),  2),
+                    "low":    round(float(last_row["Low"]),   2),
+                    "close":  round(float(last_row["Close"]), 2),
+                    "volume": int(last_row["Volume"]) if not pd.isna(last_row["Volume"]) else 0,
+                },
             }
         except Exception as e:
-            logger.warning(f"Alert poller error for {ticker}: {e}")
+            logger.warning(f"_fetch_quotes_sync error for {ticker}: {e}")
 
     return results
 
@@ -276,7 +359,7 @@ async def _alert_loop() -> None:
         f"interval={ALERT_POLL_SECONDS}s, cooldown={ALERT_COOLDOWN_SECONDS}s, webhook configured."
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     async with httpx.AsyncClient() as client:
         while True:
@@ -286,7 +369,7 @@ async def _alert_loop() -> None:
                 continue
 
             try:
-                quotes = await loop.run_in_executor(_executor, _fetch_quotes_sync)
+                quotes = await loop.run_in_executor(_executor, _get_cached_quotes)
             except Exception as e:
                 logger.error(f"Alert poller executor error: {e}")
                 continue
@@ -365,7 +448,7 @@ async def _send_daily_close_summary(client: httpx.AsyncClient) -> None:
     if not DISCORD_WEBHOOK_URL:
         return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     results = await loop.run_in_executor(_executor, _fetch_daily_closes_sync)
     if not results:
         logger.warning("Daily close: no data to send")
@@ -431,9 +514,9 @@ async def _send_hourly_movers(client: httpx.AsyncClient) -> None:
     if not DISCORD_WEBHOOK_URL:
         return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        quotes = await loop.run_in_executor(_executor, _fetch_quotes_sync)
+        quotes = await loop.run_in_executor(_executor, _get_cached_quotes)
     except Exception as e:
         logger.error(f"Hourly movers fetch error: {e}")
         return
@@ -747,120 +830,20 @@ def get_history(
 
 
 @app.get("/quotes")
-def get_quotes():
+async def get_quotes():
     """
     Fast batch quote endpoint — fetches last 2 days at 1m interval with pre/post market,
     returns latest price/change/volume + extended hours data for all 30 stocks.
     Called every 5s by the frontend for real-time updates.
+    Results are cached for 10 seconds (shared with alert/hourly-movers pollers).
     """
-    et = pytz.timezone('America/New_York')
-
-    tickers = [s["ticker"] for s in DEFAULT_STOCKS]
+    loop = asyncio.get_running_loop()
     try:
-        data = yf.download(
-            tickers,
-            period="2d",
-            interval="1m",
-            group_by="ticker",
-            auto_adjust=True,
-            prepost=True,
-            progress=False,
-            threads=True,
-        )
+        raw = await loop.run_in_executor(_executor, _get_cached_quotes)
     except Exception as e:
-        logger.error(f"/quotes fetch failed: {e}")
+        logger.error(f"/quotes error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-    results = {}
-    for stock in DEFAULT_STOCKS:
-        ticker = stock["ticker"]
-        try:
-            td = data[ticker] if len(tickers) > 1 else data
-            td = td.dropna(subset=["Close"])
-            if len(td) == 0:
-                continue
-
-            # Partition rows by ET session
-            reg_rows  = []
-            pre_rows  = []
-            post_rows = []
-            for ts, row in td.iterrows():
-                ts_et = ts.astimezone(et)
-                t = ts_et.time()
-                if dtime(9, 30) <= t < dtime(16, 0):
-                    reg_rows.append(row)
-                elif dtime(4, 0) <= t < dtime(9, 30):
-                    pre_rows.append(row)
-                else:
-                    # after 16:00 or before 04:00 ET
-                    post_rows.append(row)
-
-            # Regular session close (most recent regular bar)
-            if reg_rows:
-                reg_close = float(reg_rows[-1]["Close"])
-                reg_high  = float(max(r["High"]   for r in reg_rows))
-                reg_low   = float(min(r["Low"]    for r in reg_rows))
-                reg_vol   = int(sum(r["Volume"]   for r in reg_rows if not pd.isna(r["Volume"])))
-            else:
-                # No regular bars today; fall back to last close in all data
-                reg_close = float(td["Close"].iloc[-1])
-                reg_high  = reg_close
-                reg_low   = reg_close
-                reg_vol   = 0
-
-            # prev_close: last bar from a previous calendar day
-            today_date = td.index[-1].astimezone(et).date()
-            prev_bars = [row for ts, row in td.iterrows() if ts.astimezone(et).date() < today_date]
-            prev_close = float(prev_bars[-1]["Close"]) if prev_bars else reg_close
-
-            # Determine current market session and extended price
-            ext_price: Optional[float] = None
-            ext_change_pct: Optional[float] = None
-            ext_session: Optional[str] = None
-
-            if post_rows:
-                ext_price = float(post_rows[-1]["Close"])
-                ext_change_pct = round((ext_price - reg_close) / reg_close * 100, 4) if reg_close else None
-                ext_session = "POST"
-            elif pre_rows:
-                ext_price = float(pre_rows[-1]["Close"])
-                ext_change_pct = round((ext_price - prev_close) / prev_close * 100, 4) if prev_close else None
-                ext_session = "PRE"
-
-            # Regular session change vs prev_close
-            change     = reg_close - prev_close
-            change_pct = (change / prev_close * 100) if prev_close != 0 else 0.0
-
-            # Last minute-candle (incl. extended) for chart update
-            last_row = td.iloc[-1]
-            last_ts  = int(last_row.name.timestamp())
-
-            results[ticker] = {
-                "price":          round(reg_close, 2),
-                "prev_close":     round(prev_close, 2),
-                "change":         round(change, 2),
-                "change_pct":     round(change_pct, 2),
-                "day_high":       round(reg_high, 2),
-                "day_low":        round(reg_low, 2),
-                "volume":         reg_vol,
-                # Extended hours
-                "ext_price":      round(ext_price, 2) if ext_price is not None else None,
-                "ext_change_pct": ext_change_pct,
-                "ext_session":    ext_session,
-                # Last candle for chart
-                "last_candle": {
-                    "time":   last_ts,
-                    "open":   round(float(last_row["Open"]),  2),
-                    "high":   round(float(last_row["High"]),  2),
-                    "low":    round(float(last_row["Low"]),   2),
-                    "close":  round(float(last_row["Close"]), 2),
-                    "volume": int(last_row["Volume"]) if not pd.isna(last_row["Volume"]) else 0,
-                },
-            }
-        except Exception as e:
-            logger.warning(f"/quotes error for {ticker}: {e}")
-
-    return results
+    return raw
 
 
 @app.get("/earnings/{ticker}")
@@ -1058,7 +1041,7 @@ async def get_signals():
         if now - ts < _SIGNALS_TTL:
             return data
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(_executor, _fetch_signals_sync)
     except Exception as e:
@@ -1097,7 +1080,7 @@ async def get_backtest(strategy: str):
     if strategy not in valid:
         raise HTTPException(status_code=400, detail=f"strategy must be one of: {valid}")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(_executor, _run_backtest_sync, strategy)
     except Exception as e:

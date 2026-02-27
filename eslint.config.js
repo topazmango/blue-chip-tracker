@@ -19,5 +19,10 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // setState in an effect body is idiomatic React for resetting/seeding state
+      // on dep changes; the React Compiler rule is too aggressive here.
+      'react-hooks/set-state-in-effect': 'off',
+    },
   },
 ])

@@ -116,12 +116,64 @@ def _fetch_ohlcv(ticker: str, start: str = BACKTEST_START) -> pd.DataFrame:
 def fetch_universe(start: str = BACKTEST_START) -> dict[str, pd.DataFrame]:
     """
     Return dict {ticker: enriched_df} for every ticker in UNIVERSE + SPY.
+    Uses a single batched yf.download() call for all uncached tickers,
+    then falls back to individual _fetch_ohlcv() for cached ones.
     """
     all_tickers = UNIVERSE + ["SPY"]
+    now = time.monotonic()
+
+    # Split into cached (still fresh) and stale/missing
+    fresh: dict[str, pd.DataFrame] = {}
+    stale: list[str] = []
+    for ticker in all_tickers:
+        cached = _ohlcv_cache.get(ticker)
+        if cached is not None:
+            ts, df = cached
+            if now - ts < OHLCV_TTL:
+                fresh[ticker] = df
+                continue
+        stale.append(ticker)
+
+    # Batch-fetch all stale tickers in one request
+    if stale:
+        try:
+            raw = yf.download(
+                stale,
+                start=start,
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+            fetch_ts = time.monotonic()
+            for ticker in stale:
+                try:
+                    td = raw[ticker] if len(stale) > 1 else raw
+                    if td is None or td.empty:
+                        logger.warning(f"engine: empty batch data for {ticker}")
+                        continue
+                    df = td[["Open", "High", "Low", "Close", "Volume"]].copy()
+                    df = df.dropna(subset=["Close"])
+                    df.index = pd.DatetimeIndex(df.index).tz_convert("UTC")
+                    _ohlcv_cache[ticker] = (fetch_ts, df)
+                    fresh[ticker] = df
+                    logger.info(f"engine: batch-fetched {len(df)} rows for {ticker}")
+                except Exception as exc:
+                    logger.warning(f"engine: batch parse error for {ticker}: {exc}")
+        except Exception as exc:
+            logger.error(f"engine: batch fetch failed: {exc}")
+            # Fall back to individual fetches for any still-missing tickers
+            for ticker in stale:
+                if ticker not in fresh:
+                    df = _fetch_ohlcv(ticker, start=start)
+                    if not df.empty:
+                        fresh[ticker] = df
+
     result: dict[str, pd.DataFrame] = {}
     for ticker in all_tickers:
-        df = _fetch_ohlcv(ticker, start=start)
-        if not df.empty:
+        df = fresh.get(ticker)
+        if df is not None and not df.empty:
             result[ticker] = compute_indicators(df)
     return result
 

@@ -19,7 +19,7 @@ export default function App() {
 
   // User-added custom stocks (not in DEFAULT_STOCKS)
   const [customStocks, setCustomStocks] = useState<StockInfo[]>([]);
-  const customTickers = customStocks.map((s) => s.ticker);
+  const customTickers = useMemo(() => customStocks.map((s) => s.ticker), [customStocks]);
 
   // Merge base + custom, deduplicating by ticker.
   // Must be memoized — an inline array literal would be a new reference on every render,
@@ -41,7 +41,6 @@ export default function App() {
 
   // ── Add / remove custom stocks ─────────────────────────────────────────────
   const handleAddStock = useCallback((result: SearchResult) => {
-    if (stocks.some((s) => s.ticker === result.ticker)) return;
     const newStock: StockInfo = {
       ticker:     result.ticker,
       name:       result.name,
@@ -54,20 +53,31 @@ export default function App() {
       day_high:   result.price,
       day_low:    result.price,
     };
-    setCustomStocks((prev) => [...prev, newStock]);
-    setStocks((prev) => [...prev, newStock]);
-  }, [stocks, setStocks]);
+    // Use functional updater to avoid closing over stale `stocks`
+    setStocks((prev) => {
+      if (prev.some((s) => s.ticker === result.ticker)) return prev;
+      return [...prev, newStock];
+    });
+    setCustomStocks((prev) => {
+      if (prev.some((s) => s.ticker === result.ticker)) return prev;
+      return [...prev, newStock];
+    });
+  }, [setStocks]);
 
   const handleRemoveStock = useCallback((ticker: string) => {
     setCustomStocks((prev) => prev.filter((s) => s.ticker !== ticker));
     setStocks((prev) => prev.filter((s) => s.ticker !== ticker));
-    if (selectedTicker === ticker) {
-      setSelectedTicker(stocks.find((s) => s.ticker !== ticker)?.ticker ?? null);
-    }
-  }, [selectedTicker, stocks, setStocks]);
+    setSelectedTicker((current) => {
+      if (current !== ticker) return current;
+      // Pick the first remaining stock that isn't the one being removed
+      return null; // will be picked up by the auto-select effect below
+    });
+  }, [setStocks]);
 
   // ── Price alerts ──────────────────────────────────────────────────────────
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
+  const alertsRef = useRef<PriceAlert[]>(alerts);
+  useEffect(() => { alertsRef.current = alerts; }, [alerts]);
 
   const handleAlertAdd = useCallback((ticker: string, price: number) => {
     const id = `${ticker}-${price}-${Date.now()}`;
@@ -78,7 +88,8 @@ export default function App() {
     setAlerts((prev) =>
       prev.map((a) => (a.id === id ? { ...a, triggered: true } : a)),
     );
-    const alert = alerts.find((a) => a.id === id);
+    // Use the ref to avoid a stale closure over `alerts`
+    const alert = alertsRef.current.find((a) => a.id === id);
     if (alert && window.electronAPI) {
       try {
         new Notification(`Price Alert — ${alert.ticker}`, {
@@ -86,7 +97,7 @@ export default function App() {
         });
       } catch { /* browser Notification API may not be available */ }
     }
-  }, [alerts]);
+  }, []);
 
   useEffect(() => {
     if (!selectedTicker && stocks.length > 0) setSelectedTicker(stocks[0].ticker);

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import type { StockInfo, Timeframe, IndicatorSettings, Candle, ChartType, DrawingTool, ChartActions, PriceAlert } from '../types';
 import { useStockHistory, useEarnings, useSpyHistory, useStockMeta } from '../hooks/useStockData';
 import ChartPane from './ChartPane';
@@ -39,10 +39,29 @@ function fmtLarge(n: number) {
 }
 
 /** Visual tick-rate indicator.
- *  Shows a pulsing dot + a decaying arc/bar that refills on each new tick,
- *  giving an intuitive sense of how fast/fresh the price updates are.
+ *  Shows a pulsing dot + a decaying arc/bar that refills on each new tick.
+ *  Owns its own 100ms interval so the parent component never re-renders for it.
  */
-function TickCamera({ tickAge, pollMs }: { tickAge: number; pollMs: number }) {
+function TickCamera({ liveCandle, pollMs }: { liveCandle: Candle | null | undefined; pollMs: number }) {
+  const [tickAge, setTickAge] = useState<number>(0);
+  const lastTickRef = useRef<number>(0);
+
+  // Reset on every new live candle
+  useEffect(() => {
+    if (!liveCandle) return;
+    lastTickRef.current = performance.now();
+    setTickAge(0);
+  }, [liveCandle]);
+
+  // 100ms decay animation — isolated to this component
+  useEffect(() => {
+    const id = setInterval(() => {
+      const age = performance.now() - lastTickRef.current;
+      setTickAge(Math.min(age, pollMs));
+    }, 100);
+    return () => clearInterval(id);
+  }, [pollMs]);
+
   // freshness: 1.0 = just updated, 0.0 = full interval elapsed
   const freshness = Math.max(0, 1 - tickAge / pollMs);
 
@@ -109,34 +128,14 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
 
   // ChartPane exposes actions via forwardRef; wire to the shared ref
   const chartPaneRef = useRef<ChartActions | null>(null);
-  const setRef = (actions: ChartActions | null) => {
+  const setRef = useCallback((actions: ChartActions | null) => {
     chartPaneRef.current = actions;
     // chartActionsRef is a MutableRefObject passed from App — safe to write
     const mutableRef = chartActionsRef as { current: ChartActions | null };
     mutableRef.current = actions;
-  };
+  }, [chartActionsRef]);
 
-  // Track when the last tick arrived so we can show update freshness
-  const [tickAge, setTickAge] = useState<number>(0);        // ms since last tick
-  const lastTickRef = useRef<number>(0);
   const POLL_MS = 5000;
-
-  // Flash on every new liveCandle
-  useEffect(() => {
-    if (!liveCandle) return;
-    lastTickRef.current = performance.now();
-    setTickAge(0);
-  }, [liveCandle]);
-
-  // Fast counter to animate decay between ticks
-  useEffect(() => {
-    if (!isLive) return;
-    const id = setInterval(() => {
-      const age = performance.now() - lastTickRef.current;
-      setTickAge(Math.min(age, POLL_MS));
-    }, 100);
-    return () => clearInterval(id);
-  }, [isLive]);
 
   // Pre/post only makes sense for intraday timeframes (1D = 5m, 1W = 30m)
   const intradayTimeframes: Timeframe[] = ['1D', '1W'];
@@ -147,6 +146,13 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
   const meta = useStockMeta(stock?.ticker ?? null);
 
   const inQuantUniverse = stock != null && QUANT_UNIVERSE.has(stock.ticker);
+
+  // Alerts scoped to the current ticker only — memoized to avoid new array reference every render
+  // Must be before the early return to satisfy rules-of-hooks
+  const tickerAlerts = useMemo(
+    () => (stock ? alerts.filter((a) => a.ticker === stock.ticker) : []),
+    [alerts, stock],
+  );
 
   if (!stock) {
     return (
@@ -166,9 +172,6 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
   const extUp   = (stock.ext_change_pct ?? 0) >= 0;
   const extColor = extUp ? '#26a69a' : '#ef5350';
 
-  // Alerts scoped to the current ticker only
-  const tickerAlerts = alerts.filter((a) => a.ticker === stock.ticker);
-
   return (
     <div className="flex-1 flex flex-col min-w-0 h-full" style={{ backgroundColor: '#131722' }}>
 
@@ -184,7 +187,7 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
             {stock.sector}
           </span>
           {isLive && (
-            <TickCamera tickAge={tickAge} pollMs={POLL_MS} />
+            <TickCamera liveCandle={liveCandle} pollMs={POLL_MS} />
           )}
         </div>
 

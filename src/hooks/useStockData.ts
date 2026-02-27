@@ -4,7 +4,7 @@ import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, Sto
 // Electron: window.electronAPI present → local Python server
 // Web (Vercel): VITE_API_URL env var set to Railway URL
 const API_BASE =
-  typeof window !== 'undefined' && (window as any).electronAPI
+  typeof window !== 'undefined' && (window as unknown as { electronAPI?: unknown }).electronAPI
     ? 'http://localhost:8765'
     : (import.meta.env.VITE_API_URL ?? 'http://localhost:8765');
 
@@ -51,7 +51,6 @@ export function useStockHistory(ticker: string | null, timeframe: Timeframe, pre
       abortRef.current.abort();
     }
     abortRef.current = new AbortController();
-
     setLoading(true);
     setError(null);
 
@@ -187,7 +186,7 @@ export function useEarnings(ticker: string | null) {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     if (!ticker) {
-      Promise.resolve().then(() => setEarnings([]));
+      setEarnings([]);
       return () => abortRef.current?.abort();
     }
     fetch(`${API_BASE}/earnings/${ticker}`, { signal: abortRef.current.signal })
@@ -227,7 +226,7 @@ export function useStockMeta(ticker: string | null) {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     if (!ticker) {
-      Promise.resolve().then(() => setMeta(null));
+      setMeta(null);
       return () => abortRef.current?.abort();
     }
     fetch(`${API_BASE}/meta/${ticker}`, { signal: abortRef.current.signal })

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import type { StockInfo, SearchResult } from '../types';
 import StockCard from './StockCard';
 import { Search, AlertCircle, Plus, X, Loader2 } from 'lucide-react';
@@ -82,7 +82,9 @@ export default function StockList({
     return list;
   }, [stocks, filterQuery, sortBy]);
 
-  const isCustom = (ticker: string) => customTickers.includes(ticker);
+  const isCustom = useMemo(() => new Set(customTickers), [customTickers]);
+
+  const handleSelect = useCallback((ticker: string) => onSelect(ticker), [onSelect]);
 
   return (
     <aside
@@ -264,11 +266,11 @@ export default function StockList({
                 <StockCard
                   stock={stock}
                   selected={selectedTicker === stock.ticker}
-                  onClick={() => onSelect(stock.ticker)}
+                  onClick={() => handleSelect(stock.ticker)}
                   signal={signalMap[stock.ticker] ?? null}
                 />
                 {/* Remove button — only for user-added custom symbols */}
-                {isCustom(stock.ticker) && (
+                {isCustom.has(stock.ticker) && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

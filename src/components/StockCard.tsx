@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { StockInfo, TickerSignal } from '../types';
 
 interface Props {
@@ -7,22 +8,23 @@ interface Props {
   signal?: TickerSignal | null;
 }
 
+// Hoisted formatters — constructed once at module load, not per render
+const priceFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const timeFormatter  = new Intl.DateTimeFormat('en-US', {
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hour12: false, timeZone: 'America/New_York',
+});
+
 function fmt(n: number) {
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return priceFormatter.format(n);
 }
 
 function fmtTime(ts: number): string {
   // ts is a Unix timestamp in seconds (ET market time from yfinance)
-  return new Date(ts * 1000).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-    timeZone: 'America/New_York',
-  });
+  return timeFormatter.format(new Date(ts * 1000));
 }
 
-export default function StockCard({ stock, selected, onClick, signal }: Props) {
+const StockCard = memo(function StockCard({ stock, selected, onClick, signal }: Props) {
   const isUp = stock.change_pct > 0;
   const isDown = stock.change_pct < 0;
   const changeColor = isUp ? '#26a69a' : isDown ? '#ef5350' : '#787b86';
@@ -103,4 +105,6 @@ export default function StockCard({ stock, selected, onClick, signal }: Props) {
       </div>
     </button>
   );
-}
+});
+
+export default StockCard;

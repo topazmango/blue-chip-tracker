@@ -59,10 +59,14 @@ type Drawing =
 
 function calcSMA(candles: Candle[], period: number): { time: UTCTimestamp; value: number }[] {
   const result: { time: UTCTimestamp; value: number }[] = [];
-  for (let i = period - 1; i < candles.length; i++) {
-    const slice = candles.slice(i - period + 1, i + 1);
-    const avg = slice.reduce((s, c) => s + c.close, 0) / period;
-    result.push({ time: candles[i].time as UTCTimestamp, value: parseFloat(avg.toFixed(2)) });
+  if (candles.length < period) return result;
+  // Rolling sum — O(n) instead of O(n×period)
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += candles[i].close;
+  result.push({ time: candles[period - 1].time as UTCTimestamp, value: parseFloat((sum / period).toFixed(2)) });
+  for (let i = period; i < candles.length; i++) {
+    sum += candles[i].close - candles[i - period].close;
+    result.push({ time: candles[i].time as UTCTimestamp, value: parseFloat((sum / period).toFixed(2)) });
   }
   return result;
 }
@@ -71,10 +75,24 @@ function calcBollinger(candles: Candle[], period = 20, mult = 2) {
   const mid: { time: UTCTimestamp; value: number }[] = [];
   const upper: { time: UTCTimestamp; value: number }[] = [];
   const lower: { time: UTCTimestamp; value: number }[] = [];
+  if (candles.length < period) return { mid, upper, lower };
+  // Rolling mean + variance — O(n) with Welford-style update
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < period; i++) {
+    sum += candles[i].close;
+    sumSq += candles[i].close * candles[i].close;
+  }
   for (let i = period - 1; i < candles.length; i++) {
-    const slice = candles.slice(i - period + 1, i + 1).map((c) => c.close);
-    const avg = slice.reduce((s, v) => s + v, 0) / period;
-    const std = Math.sqrt(slice.reduce((s, v) => s + (v - avg) ** 2, 0) / period);
+    if (i > period - 1) {
+      const removed = candles[i - period].close;
+      const added   = candles[i].close;
+      sum   += added - removed;
+      sumSq += added * added - removed * removed;
+    }
+    const avg = sum / period;
+    const variance = Math.max(0, sumSq / period - avg * avg);
+    const std = Math.sqrt(variance);
     const t = candles[i].time as UTCTimestamp;
     mid.push({ time: t, value: parseFloat(avg.toFixed(2)) });
     upper.push({ time: t, value: parseFloat((avg + mult * std).toFixed(2)) });
@@ -181,8 +199,12 @@ interface VPBucket {
 
 function buildVolumeProfile(candles: Candle[], bins = 40): VPBucket[] {
   if (candles.length === 0) return [];
-  const priceMin = Math.min(...candles.map((c) => c.low));
-  const priceMax = Math.max(...candles.map((c) => c.high));
+  let priceMin = candles[0].low;
+  let priceMax = candles[0].high;
+  for (const c of candles) {
+    if (c.low  < priceMin) priceMin = c.low;
+    if (c.high > priceMax) priceMax = c.high;
+  }
   const binSize  = (priceMax - priceMin) / bins;
   const buckets: VPBucket[] = Array.from({ length: bins }, (_, i) => ({
     price:   priceMin + (i + 0.5) * binSize,
@@ -541,6 +563,9 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
   useEffect(() => { earningsRef.current = earningsDates; },    [earningsDates]);
   useEffect(() => { onAlertTriggeredRef.current = onAlertTriggered; }, [onAlertTriggered]);
 
+  // rAF handle for redrawCanvas throttle
+  const rafRef = useRef<number | null>(null);
+
   // Drawing state
   const drawingsRef   = useRef<Drawing[]>([]);
   const draftRef      = useRef<Drawing | null>(null);
@@ -580,25 +605,22 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
   // ── Canvas redraw ──────────────────────────────────────────────────────────
   const redrawCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    const chart  = chartRef.current;
-    const mainS  = seriesRefs.current['candle'];
-    if (!canvas || !chart || !mainS) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    // Throttle via requestAnimationFrame — at most one redraw per frame
+    if (rafRef.current !== null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      const canvas = canvasRef.current;
+      const chart  = chartRef.current;
+      const mainS  = seriesRefs.current['candle'];
+      if (!canvas || !chart || !mainS) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-    // Check for triggered alerts
-    const livePrice = (mainS as ISeriesApi<'Candlestick'>).coordinateToPrice(0);
-    for (const al of alertsRef.current) {
-      if (!al.triggered && livePrice !== null) {
-        // We check against last candle close instead
-      }
-    }
-
-    drawAll(ctx, drawingsRef.current, draftRef.current, canvas.width, canvas.height, chart, mainS, {
-      vpBuckets:    vpBucketsRef.current,
-      earningsDates: earningsRef.current,
-      alerts:       alertsRef.current,
+      drawAll(ctx, drawingsRef.current, draftRef.current, canvas.width, canvas.height, chart, mainS, {
+        vpBuckets:    vpBucketsRef.current,
+        earningsDates: earningsRef.current,
+        alerts:       alertsRef.current,
+      });
     });
   }, []);
 
@@ -677,8 +699,13 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
   }), [timeframe]);
 
   // ── Main chart build ───────────────────────────────────────────────────────
+  // NOTE: `candles` is intentionally NOT in the dep array here.
+  // The chart is only fully rebuilt when structural props change (timeframe,
+  // indicators, chartType, spyCandles, prepost). Candle data updates flow
+  // through either the separate setData effect below or the liveCandle effect.
   useEffect(() => {
-    if (!containerRef.current || candles.length === 0) return;
+    const cs = candlesRef.current;
+    if (!containerRef.current || cs.length === 0) return;
 
     destroyCharts();
 
@@ -710,17 +737,17 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       lastValueVisible: false, priceLineVisible: false,
     });
     chart.priceScale('bands').applyOptions({ scaleMargins: { top: 0, bottom: 0 }, visible: false });
-    bandSeries.setData(buildBandData(candles, unit));
+    bandSeries.setData(buildBandData(cs, unit));
     seriesRefs.current['bands'] = bandSeries;
 
-    const boundaries = getPeriodBoundaryTimes(candles, unit);
+    const boundaries = getPeriodBoundaryTimes(cs, unit);
     if (boundaries.length > 0) {
       const boundarySet = new Set(boundaries);
       const divSeries = chart.addSeries(HistogramSeries, {
         priceFormat: { type: 'volume' }, priceScaleId: 'bands',
         lastValueVisible: false, priceLineVisible: false,
       });
-      divSeries.setData(candles.map((c) => ({
+      divSeries.setData(cs.map((c) => ({
         time: c.time as UTCTimestamp, value: 1,
         color: boundarySet.has(c.time as UTCTimestamp) ? 'rgba(148,163,184,0.25)' : 'rgba(0,0,0,0)',
       })));
@@ -737,7 +764,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     if (chartType === 'bar') {
       const s = chart.addSeries(BarSeries, { upColor: '#26a69a', downColor: '#ef5350' });
-      s.setData(candles.map((c) => {
+      s.setData(cs.map((c) => {
         if (isExtCandle(c)) {
           return { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close,
             color: extColor };
@@ -747,24 +774,24 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       mainSeries = s;
     } else if (chartType === 'line') {
       const s = chart.addSeries(LineSeries, { color: '#2962ff', lineWidth: 2, priceLineVisible: true, lastValueVisible: true });
-      s.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
+      s.setData(cs.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
       mainSeries = s;
     } else if (chartType === 'area') {
       const s = chart.addSeries(AreaSeries, {
         lineColor: '#2962ff', topColor: 'rgba(41,98,255,0.28)', bottomColor: 'rgba(41,98,255,0.02)',
         lineWidth: 2, priceLineVisible: true, lastValueVisible: true,
       });
-      s.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
+      s.setData(cs.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
       mainSeries = s;
     } else if (chartType === 'baseline') {
-      const baseValue = candles[0]?.close ?? 0;
+      const baseValue = cs[0]?.close ?? 0;
       const s = chart.addSeries(BaselineSeries, {
         baseValue: { type: 'price', price: baseValue },
         topLineColor: '#26a69a', topFillColor1: 'rgba(38,166,154,0.28)', topFillColor2: 'rgba(38,166,154,0.02)',
         bottomLineColor: '#ef5350', bottomFillColor1: 'rgba(239,83,80,0.02)', bottomFillColor2: 'rgba(239,83,80,0.28)',
         lineWidth: 2,
       });
-      s.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
+      s.setData(cs.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
       mainSeries = s;
     } else {
       const s = chart.addSeries(CandlestickSeries, {
@@ -772,7 +799,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
         borderUpColor: '#26a69a', borderDownColor: '#ef5350',
         wickUpColor: '#26a69a', wickDownColor: '#ef5350',
       });
-      s.setData(candles.map((c) => {
+      s.setData(cs.map((c) => {
         if (isExtCandle(c)) {
           return {
             time: c.time as UTCTimestamp,
@@ -792,7 +819,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
         color: '#26a69a', priceFormat: { type: 'volume' }, priceScaleId: 'volume',
       });
       chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-      volSeries.setData(candles.map((c) => ({
+      volSeries.setData(cs.map((c) => ({
         time: c.time as UTCTimestamp, value: c.volume,
         color: c.close >= c.open ? '#26a69a40' : '#ef535040',
       })));
@@ -801,7 +828,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     // ── Volume Profile (precompute buckets) ──────────────────────────────────
     if (indicators.volumeProfile) {
-      vpBucketsRef.current = buildVolumeProfile(candles);
+      vpBucketsRef.current = buildVolumeProfile(cs);
     } else {
       vpBucketsRef.current = [];
     }
@@ -813,7 +840,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       { key: 'sma200', period: 200, color: '#ab47bc', enabled: indicators.sma200 },
     ]) {
       if (!cfg.enabled) continue;
-      const data = calcSMA(candles, cfg.period);
+      const data = calcSMA(cs, cfg.period);
       if (!data.length) continue;
       const s = chart.addSeries(LineSeries, {
         color: cfg.color, lineWidth: 1,
@@ -825,7 +852,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     // ── Bollinger Bands ──────────────────────────────────────────────────────
     if (indicators.bollingerBands) {
-      const bb = calcBollinger(candles);
+      const bb = calcBollinger(cs);
       if (bb.mid.length > 0) {
         const bbOpts = { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
         const bbMid   = chart.addSeries(LineSeries, { ...bbOpts, color: '#26a69a',   lineWidth: 1, lineStyle: LineStyle.Dashed });
@@ -842,7 +869,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     // ── Support & Resistance price lines ─────────────────────────────────────
     if (indicators.supportResistance) {
-      const { highs, lows } = detectSR(candles);
+      const { highs, lows } = detectSR(cs);
       const plOpts = { lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: false };
       for (const price of highs.slice(-8)) {
         mainSeries.createPriceLine({ price, color: '#ef535060', ...plOpts, title: '' });
@@ -859,7 +886,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
     if (indicators.relativeStrength && spyCandles.length > 0) {
       const spyMap = new Map(spyCandles.map((s) => [s.time, s.close]));
       const rsData: { time: UTCTimestamp; value: number }[] = [];
-      for (const c of candles) {
+      for (const c of cs) {
         const spyClose = spyMap.get(c.time);
         if (spyClose && spyClose > 0) {
           rsData.push({ time: c.time as UTCTimestamp, value: parseFloat(((c.close / spyClose) * 100).toFixed(4)) });
@@ -883,7 +910,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     // ── Visible range ────────────────────────────────────────────────────────
     const fromTime = getVisibleFromTime(timeframe);
-    const toTime   = (candles[candles.length - 1].time + 3600) as UTCTimestamp;
+    const toTime   = (cs[cs.length - 1].time + 3600) as UTCTimestamp;
     if (timeframe === 'ALL') {
       chart.timeScale().fitContent();
     } else {
@@ -898,7 +925,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       });
       rsiChartRef.current = rsiChart;
 
-      const rsiData = calcRSI(candles);
+      const rsiData = calcRSI(cs);
       if (rsiData.length > 0) {
         const rsiSeries = rsiChart.addSeries(LineSeries, {
           color: '#ef5350', lineWidth: 1,
@@ -916,8 +943,10 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       if (timeframe === 'ALL') rsiChart.timeScale().fitContent();
       else rsiChart.timeScale().setVisibleRange({ from: fromTime as UTCTimestamp, to: toTime });
 
-      chart.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r) rsiChart.timeScale().setVisibleLogicalRange(r); });
-      rsiChart.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r) chart.timeScale().setVisibleLogicalRange(r); });
+      const syncMainToRsi  = (r: { from: number; to: number } | null) => { if (r) rsiChart.timeScale().setVisibleLogicalRange(r); };
+      const syncRsiToMain  = (r: { from: number; to: number } | null) => { if (r) chart.timeScale().setVisibleLogicalRange(r); };
+      chart.timeScale().subscribeVisibleLogicalRangeChange(syncMainToRsi);
+      rsiChart.timeScale().subscribeVisibleLogicalRangeChange(syncRsiToMain);
     }
 
     // ── MACD sub-chart ───────────────────────────────────────────────────────
@@ -928,7 +957,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       });
       macdChartRef.current = macdChart;
 
-      const { macdLine, signalData, hist } = calcMACD(candles);
+      const { macdLine, signalData, hist } = calcMACD(cs);
       if (macdLine.length > 0) {
         const macdSeries = macdChart.addSeries(LineSeries, {
           color: '#7c3aed', lineWidth: 1,
@@ -953,20 +982,26 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
       if (timeframe === 'ALL') macdChart.timeScale().fitContent();
       else macdChart.timeScale().setVisibleRange({ from: fromTime as UTCTimestamp, to: toTime });
 
-      chart.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r) macdChart.timeScale().setVisibleLogicalRange(r); });
-      macdChart.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r) chart.timeScale().setVisibleLogicalRange(r); });
+      const syncMainToMacd = (r: { from: number; to: number } | null) => { if (r) macdChart.timeScale().setVisibleLogicalRange(r); };
+      const syncMacdToMain = (r: { from: number; to: number } | null) => { if (r) chart.timeScale().setVisibleLogicalRange(r); };
+      chart.timeScale().subscribeVisibleLogicalRangeChange(syncMainToMacd);
+      macdChart.timeScale().subscribeVisibleLogicalRangeChange(syncMacdToMain);
 
       // Also sync with RSI if both are shown
       if (showRSI && rsiChartRef.current) {
         const rc = rsiChartRef.current;
-        macdChart.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r) rc.timeScale().setVisibleLogicalRange(r); });
-        rc.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r) macdChart.timeScale().setVisibleLogicalRange(r); });
+        const syncMacdToRsi = (r: { from: number; to: number } | null) => { if (r) rc.timeScale().setVisibleLogicalRange(r); };
+        const syncRsiToMacd = (r: { from: number; to: number } | null) => { if (r) macdChart.timeScale().setVisibleLogicalRange(r); };
+        macdChart.timeScale().subscribeVisibleLogicalRangeChange(syncMacdToRsi);
+        rc.timeScale().subscribeVisibleLogicalRangeChange(syncRsiToMacd);
       }
     }
 
-    // ── Pan/zoom → redraw canvas ─────────────────────────────────────────────
-    chart.timeScale().subscribeVisibleLogicalRangeChange(() => { redrawCanvas(); });
-    chart.subscribeCrosshairMove(() => { redrawCanvas(); });
+    // ── Pan/zoom → redraw canvas (unsubscribed on cleanup) ───────────────────
+    const onRangeChange = () => redrawCanvas();
+    const onCrosshair   = () => redrawCanvas();
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
+    chart.subscribeCrosshairMove(onCrosshair);
 
     // ── Resize observer ──────────────────────────────────────────────────────
     const ro = new ResizeObserver(() => {
@@ -996,9 +1031,39 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
     });
     ro.observe(parentEl);
 
-    return () => { ro.disconnect(); destroyCharts(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candles, indicators, timeframe, chartType, spyCandles, prepost, destroyCharts]);
+    return () => {
+      ro.disconnect();
+      // Unsubscribe pan/zoom listeners before destroying charts
+      try { chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange); } catch { /* ignore */ }
+      try { chart.unsubscribeCrosshairMove(onCrosshair); } catch { /* ignore */ }
+      // Cancel any pending rAF frame
+      if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+      destroyCharts();
+    };
+  }, [indicators, timeframe, chartType, spyCandles, prepost, destroyCharts, redrawCanvas]);
+
+  // ── Candle data update (without full chart rebuild) ───────────────────────
+  // Runs whenever `candles` changes. Pushes new data into existing series refs
+  // instead of rebuilding the entire chart, which is far cheaper.
+  useEffect(() => {
+    const mainS = seriesRefs.current['candle'];
+    const volS  = seriesRefs.current['volume'];
+    if (!mainS || candles.length === 0) return;
+    const extColor = 'rgba(120,123,134,0.55)';
+    const extWick  = 'rgba(120,123,134,0.35)';
+    const isExtCandle = (c: Candle) => prepost && c.session !== 'regular' && c.session !== undefined;
+    if (chartType === 'candlestick' || chartType === 'bar') {
+      mainS.setData(candles.map((c) => isExtCandle(c)
+        ? { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close, color: extColor, borderColor: extColor, wickColor: extWick }
+        : { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close }
+      ));
+    } else {
+      mainS.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.close })));
+    }
+    if (volS) {
+      volS.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, value: c.volume, color: c.close >= c.open ? '#26a69a40' : '#ef535040' })));
+    }
+  }, [candles, chartType, prepost]);
 
   // ── 52-week Hi/Lo price lines ─────────────────────────────────────────────
   // Handled separately so meta loading after a ticker switch doesn't trigger a full chart rebuild.
