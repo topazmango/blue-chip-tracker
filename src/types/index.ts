@@ -102,3 +102,11 @@ export interface PriceAlert {
   price: number;
   triggered: boolean;
 }
+
+/** Returned by GET /search/{ticker} */
+export interface SearchResult {
+  ticker: string;
+  name: string;
+  sector: string;
+  price: number;
+}

@@ -5,7 +5,7 @@ import StockChart from './components/StockChart';
 import TitleBar from './components/TitleBar';
 import DrawingToolbar from './components/DrawingToolbar';
 import ChartToolbar from './components/ChartToolbar';
-import type { StockInfo, ChartType, DrawingTool, ChartActions, PriceAlert } from './types';
+import type { StockInfo, ChartType, DrawingTool, ChartActions, PriceAlert, SearchResult } from './types';
 
 export default function App() {
   const { stocks: baseStocks, loading, error, lastUpdated, refresh } = useStockList(60000);
@@ -17,12 +17,54 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<DrawingTool>('cursor');
   const chartActionsRef             = useRef<ChartActions | null>(null);
 
-  const { stocks, liveCandle, isLive } = useRealtimeQuotes(baseStocks, selectedTicker, 5000);
+  // User-added custom stocks (not in DEFAULT_STOCKS)
+  const [customStocks, setCustomStocks] = useState<StockInfo[]>([]);
+  const customTickers = customStocks.map((s) => s.ticker);
+
+  // Merge base + custom, deduplicating by ticker
+  const allBaseStocks: StockInfo[] = [
+    ...baseStocks,
+    ...customStocks.filter((c) => !baseStocks.some((b) => b.ticker === c.ticker)),
+  ];
+
+  const { stocks, setStocks, liveCandle, isLive } = useRealtimeQuotes(
+    allBaseStocks,
+    selectedTicker,
+    5000,
+    customTickers,
+  );
 
   const selectedStock: StockInfo | null =
     selectedTicker ? (stocks.find((s) => s.ticker === selectedTicker) ?? null) : null;
 
-  // ── Price alerts ─────────────────────────────────────────────────────────────
+  // ── Add / remove custom stocks ─────────────────────────────────────────────
+  const handleAddStock = useCallback((result: SearchResult) => {
+    if (stocks.some((s) => s.ticker === result.ticker)) return;
+    const newStock: StockInfo = {
+      ticker:     result.ticker,
+      name:       result.name,
+      sector:     result.sector,
+      price:      result.price,
+      prev_close: result.price,
+      change:     0,
+      change_pct: 0,
+      volume:     0,
+      day_high:   result.price,
+      day_low:    result.price,
+    };
+    setCustomStocks((prev) => [...prev, newStock]);
+    setStocks((prev) => [...prev, newStock]);
+  }, [stocks, setStocks]);
+
+  const handleRemoveStock = useCallback((ticker: string) => {
+    setCustomStocks((prev) => prev.filter((s) => s.ticker !== ticker));
+    setStocks((prev) => prev.filter((s) => s.ticker !== ticker));
+    if (selectedTicker === ticker) {
+      setSelectedTicker(stocks.find((s) => s.ticker !== ticker)?.ticker ?? null);
+    }
+  }, [selectedTicker, stocks, setStocks]);
+
+  // ── Price alerts ──────────────────────────────────────────────────────────
   const [alerts, setAlerts] = useState<PriceAlert[]>([]);
 
   const handleAlertAdd = useCallback((ticker: string, price: number) => {
@@ -36,7 +78,6 @@ export default function App() {
     );
     const alert = alerts.find((a) => a.id === id);
     if (alert && window.electronAPI) {
-      // Fire a native OS notification via Electron (if available)
       try {
         new Notification(`Price Alert — ${alert.ticker}`, {
           body: `Price crossed $${alert.price.toFixed(2)}`,
@@ -70,9 +111,7 @@ export default function App() {
     >
       <TitleBar maximized={maximized} fullscreen={fullscreen} onRefresh={refresh} loading={loading} />
 
-      {/* Main body */}
       <div className="flex flex-1 min-h-0">
-        {/* Watchlist */}
         <StockList
           stocks={stocks}
           loading={loading}
@@ -81,16 +120,15 @@ export default function App() {
           selectedTicker={selectedTicker}
           onSelect={setSelectedTicker}
           onRefresh={refresh}
+          onAddStock={handleAddStock}
+          onRemoveStock={handleRemoveStock}
+          customTickers={customTickers}
         />
-
-        {/* Drawing toolbar */}
         <DrawingToolbar
           activeTool={activeTool}
           onToolChange={setActiveTool}
           chartActionsRef={chartActionsRef}
         />
-
-        {/* Chart */}
         <StockChart
           stock={selectedStock}
           liveCandle={liveCandle}
@@ -103,8 +141,6 @@ export default function App() {
           onAlertAdd={handleAlertAdd}
           onAlertTriggered={handleAlertTriggered}
         />
-
-        {/* Right chart tools */}
         <ChartToolbar
           chartType={chartType}
           onChartTypeChange={setChartType}

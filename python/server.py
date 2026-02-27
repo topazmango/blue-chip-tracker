@@ -810,6 +810,141 @@ def get_meta(ticker: str):
         return {"ticker": ticker, "week52_high": None, "week52_low": None, "atr14": None}
 
 
+
+
+@app.get("/search/{ticker}")
+def search_ticker(ticker: str):
+    """
+    Validate a ticker symbol and return basic info (name, sector, price).
+    Used by the frontend add-symbol flow before adding to the watchlist.
+    Returns 404 if the ticker is not found or has no price data.
+    """
+    ticker = ticker.upper().strip()
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+
+        # yfinance returns an empty-ish dict for unknown tickers
+        price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+        long_name = info.get("longName") or info.get("shortName") or ticker
+        sector = info.get("sector") or info.get("industry") or "Unknown"
+
+        if price is None:
+            # Try fetching a tiny history as fallback
+            df = t.history(period="5d", interval="1d", auto_adjust=True)
+            if df.empty:
+                raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
+            price = round(float(df["Close"].iloc[-1]), 2)
+
+        return {
+            "ticker":  ticker,
+            "name":    long_name,
+            "sector":  sector,
+            "price":   round(float(price), 2),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"search error for {ticker}: {e}")
+        raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
+
+
+@app.get("/quote/{ticker}")
+def get_single_quote(ticker: str):
+    """
+    Return a single real-time quote for any ticker (not just DEFAULT_STOCKS).
+    Used for live-price polling of user-added custom symbols.
+    Returns same shape as one entry in /quotes.
+    """
+    ticker = ticker.upper().strip()
+    et = pytz.timezone('America/New_York')
+    try:
+        data = yf.download(
+            ticker,
+            period="2d",
+            interval="1m",
+            auto_adjust=True,
+            prepost=True,
+            progress=False,
+        )
+        if data is None or data.empty:
+            raise HTTPException(status_code=404, detail=f"No data for '{ticker}'")
+
+        td = data.dropna(subset=["Close"])
+        if len(td) == 0:
+            raise HTTPException(status_code=404, detail=f"No data for '{ticker}'")
+
+        reg_rows, pre_rows, post_rows = [], [], []
+        for ts, row in td.iterrows():
+            ts_et = ts.astimezone(et)
+            t_et = ts_et.time()
+            if dtime(9, 30) <= t_et < dtime(16, 0):
+                reg_rows.append(row)
+            elif dtime(4, 0) <= t_et < dtime(9, 30):
+                pre_rows.append(row)
+            else:
+                post_rows.append(row)
+
+        if reg_rows:
+            reg_close = float(reg_rows[-1]["Close"])
+            reg_high  = float(max(r["High"]  for r in reg_rows))
+            reg_low   = float(min(r["Low"]   for r in reg_rows))
+            reg_vol   = int(sum(r["Volume"]  for r in reg_rows if not pd.isna(r["Volume"])))
+        else:
+            reg_close = float(td["Close"].iloc[-1])
+            reg_high  = reg_close
+            reg_low   = reg_close
+            reg_vol   = 0
+
+        today_date = td.index[-1].astimezone(et).date()
+        prev_bars  = [row for ts, row in td.iterrows() if ts.astimezone(et).date() < today_date]
+        prev_close = float(prev_bars[-1]["Close"]) if prev_bars else reg_close
+
+        ext_price: Optional[float] = None
+        ext_change_pct: Optional[float] = None
+        ext_session: Optional[str] = None
+        if post_rows:
+            ext_price = float(post_rows[-1]["Close"])
+            ext_change_pct = round((ext_price - reg_close) / reg_close * 100, 4) if reg_close else None
+            ext_session = "POST"
+        elif pre_rows:
+            ext_price = float(pre_rows[-1]["Close"])
+            ext_change_pct = round((ext_price - prev_close) / prev_close * 100, 4) if prev_close else None
+            ext_session = "PRE"
+
+        change     = reg_close - prev_close
+        change_pct = (change / prev_close * 100) if prev_close != 0 else 0.0
+
+        last_row = td.iloc[-1]
+        last_ts  = int(last_row.name.timestamp())
+
+        return {
+            "price":          round(reg_close, 2),
+            "prev_close":     round(prev_close, 2),
+            "change":         round(change, 2),
+            "change_pct":     round(change_pct, 2),
+            "day_high":       round(reg_high, 2),
+            "day_low":        round(reg_low, 2),
+            "volume":         reg_vol,
+            "ext_price":      round(ext_price, 2) if ext_price is not None else None,
+            "ext_change_pct": ext_change_pct,
+            "ext_session":    ext_session,
+            "last_candle": {
+                "time":   last_ts,
+                "open":   round(float(last_row["Open"]),  2),
+                "high":   round(float(last_row["High"]),  2),
+                "low":    round(float(last_row["Low"]),   2),
+                "close":  round(float(last_row["Close"]), 2),
+                "volume": int(last_row["Volume"]) if not pd.isna(last_row["Volume"]) else 0,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"/quote/{ticker} error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8765))
     host = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"

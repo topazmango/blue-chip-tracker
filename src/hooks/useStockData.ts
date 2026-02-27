@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta } from '../types';
+import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta, SearchResult } from '../types';
 
 // Electron: window.electronAPI present → local Python server
 // Web (Vercel): VITE_API_URL env var set to Railway URL
@@ -79,7 +79,11 @@ export function useStockHistory(ticker: string | null, timeframe: Timeframe) {
 }
 
 /**
- * Polls /quotes every `interval` ms and returns:
+ * Polls /quotes (batch, DEFAULT_STOCKS) every `interval` ms.
+ * For any tickers in `customTickers` that are NOT in the batch response,
+ * individually polls /quote/{ticker}.
+ *
+ * Returns:
  *  - merged stock list with live prices
  *  - live status flag
  *  - lastCandle for the given focusTicker (only relevant on 1D timeframe)
@@ -88,15 +92,22 @@ export function useRealtimeQuotes(
   baseStocks: StockInfo[],
   focusTicker: string | null,
   interval = 5000,
+  customTickers: string[] = [],
 ) {
   const [stocks, setStocks] = useState<StockInfo[]>(baseStocks);
   const [liveCandle, setLiveCandle] = useState<QuoteData['last_candle'] | null>(null);
   const [isLive, setIsLive] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Keep a ref to baseStocks so the polling callback always sees latest value
+  // Keep refs so polling callback always sees latest values without re-creating
   const baseRef = useRef(baseStocks);
   useEffect(() => { baseRef.current = baseStocks; }, [baseStocks]);
+
+  const focusRef = useRef(focusTicker);
+  useEffect(() => { focusRef.current = focusTicker; }, [focusTicker]);
+
+  const customRef = useRef(customTickers);
+  useEffect(() => { customRef.current = customTickers; }, [customTickers]);
 
   // When baseStocks first arrives (initial load), seed state
   useEffect(() => {
@@ -108,6 +119,22 @@ export function useRealtimeQuotes(
       const res = await fetch(`${API_BASE}/quotes`);
       if (!res.ok) return;
       const quotes: Record<string, QuoteData> = await res.json();
+
+      // For any custom tickers not in the batch, fetch individually
+      const missing = customRef.current.filter((t) => !quotes[t]);
+      if (missing.length > 0) {
+        await Promise.all(
+          missing.map(async (t) => {
+            try {
+              const r = await fetch(`${API_BASE}/quote/${t}`);
+              if (r.ok) {
+                const q: QuoteData = await r.json();
+                quotes[t] = q;
+              }
+            } catch { /* ignore per-ticker errors */ }
+          }),
+        );
+      }
 
       setStocks((prev) =>
         prev.map((s) => {
@@ -129,18 +156,16 @@ export function useRealtimeQuotes(
         }),
       );
 
-      if (focusTicker && quotes[focusTicker]) {
-        setLiveCandle(quotes[focusTicker].last_candle);
+      const focus = focusRef.current;
+      if (focus && quotes[focus]) {
+        setLiveCandle(quotes[focus].last_candle);
       }
 
       setIsLive(true);
     } catch {
       setIsLive(false);
     }
-  }, [focusTicker]);
-
-  const focusRef = useRef(focusTicker);
-  useEffect(() => { focusRef.current = focusTicker; }, [focusTicker]);
+  }, []);
 
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -148,7 +173,7 @@ export function useRealtimeQuotes(
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [poll, interval]);
 
-  return { stocks, liveCandle, isLive };
+  return { stocks, setStocks, liveCandle, isLive };
 }
 
 /** Fetch earnings dates for a ticker. Re-fetches when ticker changes. */
@@ -211,4 +236,59 @@ export function useStockMeta(ticker: string | null) {
   }, [ticker]);
 
   return meta;
+}
+
+/**
+ * Validates a ticker against the backend and returns its info.
+ * `query` should be a raw ticker string typed by the user.
+ * Returns null while loading, a SearchResult on success, or 'not-found' on failure.
+ */
+export function useTickerSearch(query: string) {
+  const [result, setResult] = useState<SearchResult | 'not-found' | null>(null);
+  const [loading, setLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // Clear previous debounce + abort
+    if (timerRef.current) clearTimeout(timerRef.current);
+    abortRef.current?.abort();
+
+    const q = query.trim().toUpperCase();
+    if (q.length < 1) {
+      setResult(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setResult(null);
+
+    // Debounce 400ms so we don't hammer the server on every keystroke
+    timerRef.current = setTimeout(() => {
+      abortRef.current = new AbortController();
+      fetch(`${API_BASE}/search/${q}`, { signal: abortRef.current.signal })
+        .then((r) => {
+          if (r.status === 404) return null;
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json() as Promise<SearchResult>;
+        })
+        .then((data) => {
+          setResult(data ?? 'not-found');
+          setLoading(false);
+        })
+        .catch((e) => {
+          if (e.name === 'AbortError') return;
+          setResult('not-found');
+          setLoading(false);
+        });
+    }, 400);
+
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      abortRef.current?.abort();
+    };
+  }, [query]);
+
+  return { result, loading };
 }
