@@ -14,6 +14,7 @@ import {
 import type {
   IChartApi,
   ISeriesApi,
+  IPriceLine,
   UTCTimestamp,
   SeriesType,
 } from 'lightweight-charts';
@@ -527,6 +528,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
   const rsiChartRef      = useRef<IChartApi | null>(null);
   const macdChartRef     = useRef<IChartApi | null>(null);
   const seriesRefs       = useRef<{ [key: string]: ISeriesApi<SeriesType> }>({});
+  const priceLineRefs    = useRef<{ w52h?: IPriceLine; w52l?: IPriceLine }>({});
   const candlesRef       = useRef<Candle[]>(candles);
   useEffect(() => { candlesRef.current = candles; }, [candles]);
 
@@ -573,6 +575,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
     rsiChartRef.current  = null;
     macdChartRef.current = null;
     seriesRefs.current   = {};
+    priceLineRefs.current = {};
   }, []);
 
   // ── Canvas redraw ──────────────────────────────────────────────────────────
@@ -850,20 +853,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
     }
 
     // ── 52-week High / Low ────────────────────────────────────────────────────
-    if (indicators.week52HighLow && meta) {
-      if (meta.week52_high != null) {
-        mainSeries.createPriceLine({
-          price: meta.week52_high, color: '#26a69a',
-          lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '52W H',
-        });
-      }
-      if (meta.week52_low != null) {
-        mainSeries.createPriceLine({
-          price: meta.week52_low, color: '#ef5350',
-          lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '52W L',
-        });
-      }
-    }
+    // Handled in a separate effect below so meta loading doesn't trigger a full chart rebuild.
 
     // ── Relative Strength vs SPY ─────────────────────────────────────────────
     if (indicators.relativeStrength && spyCandles.length > 0) {
@@ -1008,7 +998,37 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     return () => { ro.disconnect(); destroyCharts(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candles, indicators, timeframe, chartType, meta, spyCandles, prepost, destroyCharts]);
+  }, [candles, indicators, timeframe, chartType, spyCandles, prepost, destroyCharts]);
+
+  // ── 52-week Hi/Lo price lines ─────────────────────────────────────────────
+  // Handled separately so meta loading after a ticker switch doesn't trigger a full chart rebuild.
+  useEffect(() => {
+    const mainS = seriesRefs.current['candle'];
+
+    // Remove existing 52W lines before (re-)adding to avoid duplicates
+    if (priceLineRefs.current.w52h) {
+      try { (mainS as ISeriesApi<'Candlestick'> | undefined)?.removePriceLine(priceLineRefs.current.w52h); } catch { /* ignore */ }
+      priceLineRefs.current.w52h = undefined;
+    }
+    if (priceLineRefs.current.w52l) {
+      try { (mainS as ISeriesApi<'Candlestick'> | undefined)?.removePriceLine(priceLineRefs.current.w52l); } catch { /* ignore */ }
+      priceLineRefs.current.w52l = undefined;
+    }
+
+    if (!mainS || !indicators.week52HighLow || !meta) return;
+    if (meta.week52_high != null) {
+      priceLineRefs.current.w52h = (mainS as ISeriesApi<'Candlestick'>).createPriceLine({
+        price: meta.week52_high, color: '#26a69a',
+        lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '52W H',
+      });
+    }
+    if (meta.week52_low != null) {
+      priceLineRefs.current.w52l = (mainS as ISeriesApi<'Candlestick'>).createPriceLine({
+        price: meta.week52_low, color: '#ef5350',
+        lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '52W L',
+      });
+    }
+  }, [meta, indicators.week52HighLow]);
 
   // ── Live candle update ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -1043,7 +1063,8 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
     const canvas = canvasRef.current;
     const chart  = chartRef.current;
     const mainS  = seriesRefs.current['candle'];
-    const rect   = canvas!.getBoundingClientRect();
+    if (!canvas) return { time: 0, price: 0 };
+    const rect   = canvas.getBoundingClientRect();
     const px     = e.clientX - rect.left;
     const py     = e.clientY - rect.top;
 
@@ -1065,7 +1086,8 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     if (tool === 'text') {
       const canvas = canvasRef.current;
-      const rect   = canvas!.getBoundingClientRect();
+      if (!canvas) return;
+      const rect   = canvas.getBoundingClientRect();
       const px     = e.clientX - rect.left;
       const py     = e.clientY - rect.top;
       const chartPt = eventToChartPoint(e);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useStockList, useRealtimeQuotes } from './hooks/useStockData';
 import StockList from './components/StockList';
 import StockChart from './components/StockChart';
@@ -21,11 +21,13 @@ export default function App() {
   const [customStocks, setCustomStocks] = useState<StockInfo[]>([]);
   const customTickers = customStocks.map((s) => s.ticker);
 
-  // Merge base + custom, deduplicating by ticker
-  const allBaseStocks: StockInfo[] = [
+  // Merge base + custom, deduplicating by ticker.
+  // Must be memoized — an inline array literal would be a new reference on every render,
+  // causing useRealtimeQuotes' seeding effect to fire every render and overwrite live prices.
+  const allBaseStocks = useMemo<StockInfo[]>(() => [
     ...baseStocks,
     ...customStocks.filter((c) => !baseStocks.some((b) => b.ticker === c.ticker)),
-  ];
+  ], [baseStocks, customStocks]);
 
   const { stocks, setStocks, liveCandle, isLive } = useRealtimeQuotes(
     allBaseStocks,
