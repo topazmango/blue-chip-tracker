@@ -6,19 +6,19 @@ interface Props {
   meta?: StockMeta | null;
 }
 
-const INDICATORS: { key: keyof IndicatorSettings; label: string; color: string }[] = [
-  { key: 'sma20',           label: 'MA20',   color: '#f59e0b' },
-  { key: 'sma50',           label: 'MA50',   color: '#2962ff' },
-  { key: 'sma200',          label: 'MA200',  color: '#ab47bc' },
-  { key: 'bollingerBands',  label: 'BB',     color: '#26a69a' },
-  { key: 'rsi',             label: 'RSI',    color: '#ef5350' },
-  { key: 'macd',            label: 'MACD',   color: '#7c3aed' },
-  { key: 'volume',          label: 'Vol',    color: '#787b86' },
-  { key: 'volumeProfile',   label: 'VPVR',   color: '#0ea5e9' },
-  { key: 'supportResistance', label: 'S&R',  color: '#f97316' },
-  { key: 'relativeStrength', label: 'RS',    color: '#84cc16' },
-  { key: 'earningsDates',   label: 'Earn',   color: '#f59e0b' },
-  { key: 'week52HighLow',   label: '52wk',   color: '#94a3b8' },
+const INDICATORS: { key: keyof IndicatorSettings; label: string; title: string; color: string }[] = [
+  { key: 'sma20',           label: 'MA20',   title: 'Simple Moving Average (20)',          color: '#f59e0b' },
+  { key: 'sma50',           label: 'MA50',   title: 'Simple Moving Average (50)',          color: '#2962ff' },
+  { key: 'sma200',          label: 'MA200',  title: 'Simple Moving Average (200)',         color: '#ab47bc' },
+  { key: 'bollingerBands',  label: 'BB',     title: 'Bollinger Bands (20, ±2σ)',           color: '#26a69a' },
+  { key: 'rsi',             label: 'RSI',    title: 'Relative Strength Index (14)',        color: '#ef5350' },
+  { key: 'macd',            label: 'MACD',   title: 'MACD (12 / 26 / 9)',                 color: '#7c3aed' },
+  { key: 'volume',          label: 'Vol',    title: 'Volume Bars',                        color: '#787b86' },
+  { key: 'volumeProfile',   label: 'VPVR',   title: 'Volume Profile (Visible Range)',     color: '#0ea5e9' },
+  { key: 'supportResistance', label: 'S&R',  title: 'Support & Resistance Levels',        color: '#f97316' },
+  { key: 'relativeStrength', label: 'RS',    title: 'Relative Strength vs SPY',           color: '#84cc16' },
+  { key: 'earningsDates',   label: 'Earn',   title: 'Earnings Date Markers',              color: '#f59e0b' },
+  { key: 'week52HighLow',   label: '52wk',   title: '52-Week High / Low',                 color: '#94a3b8' },
 ];
 
 export default function IndicatorPanel({ settings, onChange, meta }: Props) {
@@ -27,12 +27,13 @@ export default function IndicatorPanel({ settings, onChange, meta }: Props) {
 
   return (
     <div className="flex items-center gap-1">
-      {INDICATORS.map(({ key, label, color }) => {
+      {INDICATORS.map(({ key, label, title, color }) => {
         const on = settings[key];
         return (
           <button
             key={key}
             onClick={() => toggle(key)}
+            title={title}
             className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors"
             style={{
               color: on ? '#d1d4dc' : '#4c525e',
