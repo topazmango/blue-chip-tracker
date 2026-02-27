@@ -7,6 +7,7 @@ Includes background Discord alert task for ≥5% intraday moves
 
 import sys
 import os
+import time
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -96,9 +97,13 @@ TIMEFRAME_MAP = {
 DISCORD_WEBHOOK_URL: Optional[str] = os.environ.get("DISCORD_WEBHOOK_URL")
 ALERT_THRESHOLD: float = float(os.environ.get("ALERT_THRESHOLD", "5.0"))
 ALERT_POLL_SECONDS: int = 30          # How often to check (seconds)
+ALERT_COOLDOWN_SECONDS: int = 300     # Minimum gap between alerts for the same ticker (5 min)
 ET = pytz.timezone("America/New_York")
 MARKET_OPEN  = dtime(9, 30)
 MARKET_CLOSE = dtime(16, 0)
+
+# Tracks the last time (monotonic) each ticker fired a Discord alert this session
+_last_alert_sent: dict[str, float] = {}
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
@@ -225,7 +230,7 @@ async def _alert_loop() -> None:
 
     logger.info(
         f"Discord alert poller started — threshold={ALERT_THRESHOLD}%, "
-        f"interval={ALERT_POLL_SECONDS}s, webhook configured."
+        f"interval={ALERT_POLL_SECONDS}s, cooldown={ALERT_COOLDOWN_SECONDS}s, webhook configured."
     )
 
     loop = asyncio.get_event_loop()
@@ -243,16 +248,25 @@ async def _alert_loop() -> None:
                 logger.error(f"Alert poller executor error: {e}")
                 continue
 
+            now_mono = time.monotonic()
             for ticker, q in quotes.items():
                 if abs(q["change_pct"]) >= ALERT_THRESHOLD:
-                    await _send_discord_alert(
-                        client,
-                        ticker=ticker,
-                        name=q["name"],
-                        price=q["price"],
-                        prev_close=q["prev_close"],
-                        change_pct=q["change_pct"],
-                    )
+                    last_sent = _last_alert_sent.get(ticker, 0.0)
+                    if now_mono - last_sent >= ALERT_COOLDOWN_SECONDS:
+                        _last_alert_sent[ticker] = now_mono
+                        await _send_discord_alert(
+                            client,
+                            ticker=ticker,
+                            name=q["name"],
+                            price=q["price"],
+                            prev_close=q["prev_close"],
+                            change_pct=q["change_pct"],
+                        )
+                    else:
+                        secs_remaining = int(ALERT_COOLDOWN_SECONDS - (now_mono - last_sent))
+                        logger.debug(
+                            f"Alert suppressed for {ticker} — cooldown {secs_remaining}s remaining"
+                        )
 
 
 def _fetch_daily_closes_sync() -> list:
