@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import type { StockInfo, SearchResult } from '../types';
 import StockCard from './StockCard';
 import { Search, AlertCircle, Plus, X, Loader2 } from 'lucide-react';
-import { useTickerSearch } from '../hooks/useStockData';
+import { useTickerSearch, useSignals } from '../hooks/useStockData';
 
 interface Props {
   stocks: StockInfo[];
@@ -29,6 +29,13 @@ export default function StockList({
 }: Props) {
   const [filterQuery, setFilterQuery] = useState('');
   const [sortBy, setSortBy] = useState<'default' | 'change' | 'price'>('default');
+
+  // Quant signals for universe tickers
+  const { signals } = useSignals();
+  const signalMap = useMemo(
+    () => Object.fromEntries(signals.map((s) => [s.ticker, s])),
+    [signals],
+  );
 
   // Add-symbol search state
   const [addQuery, setAddQuery] = useState('');
@@ -258,6 +265,7 @@ export default function StockList({
                   stock={stock}
                   selected={selectedTicker === stock.ticker}
                   onClick={() => onSelect(stock.ticker)}
+                  signal={signalMap[stock.ticker] ?? null}
                 />
                 {/* Remove button — only for user-added custom symbols */}
                 {isCustom(stock.ticker) && (

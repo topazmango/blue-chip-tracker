@@ -1,9 +1,10 @@
-import type { StockInfo } from '../types';
+import type { StockInfo, TickerSignal } from '../types';
 
 interface Props {
   stock: StockInfo;
   selected: boolean;
   onClick: () => void;
+  signal?: TickerSignal | null;
 }
 
 function fmt(n: number) {
@@ -21,7 +22,7 @@ function fmtTime(ts: number): string {
   });
 }
 
-export default function StockCard({ stock, selected, onClick }: Props) {
+export default function StockCard({ stock, selected, onClick, signal }: Props) {
   const isUp = stock.change_pct > 0;
   const isDown = stock.change_pct < 0;
   const changeColor = isUp ? '#26a69a' : isDown ? '#ef5350' : '#787b86';
@@ -30,6 +31,9 @@ export default function StockCard({ stock, selected, onClick }: Props) {
   const extUp   = (stock.ext_change_pct ?? 0) >= 0;
   const extColor = extUp ? '#26a69a' : '#ef5350';
   const extLabel = stock.ext_session === 'PRE' ? '#f59e0b' : '#7c3aed';
+
+  const showMom = signal?.strategy_a === 'BUY';
+  const showRev = signal?.strategy_b === 'BUY';
 
   return (
     <button
@@ -42,7 +46,7 @@ export default function StockCard({ stock, selected, onClick }: Props) {
       onMouseEnter={e => { if (!selected) e.currentTarget.style.backgroundColor = '#1a1e2a'; }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.backgroundColor = 'transparent'; }}
     >
-      {/* Ticker + name + timestamp */}
+      {/* Ticker + name + timestamp + signal badges */}
       <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold tracking-wide truncate" style={{ color: selected ? '#d1d4dc' : '#b2b5be' }}>
           {stock.ticker}
@@ -50,6 +54,27 @@ export default function StockCard({ stock, selected, onClick }: Props) {
         <div className="text-[10px] truncate mt-0.5" style={{ color: '#4c525e' }}>
           {stock.name}
         </div>
+        {/* Signal badges — only shown when strategy fires BUY */}
+        {(showMom || showRev) && (
+          <div className="flex items-center gap-1 mt-1">
+            {showMom && (
+              <span
+                className="text-[8px] font-bold px-1 py-0.5 rounded leading-none"
+                style={{ backgroundColor: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}
+              >
+                ▲ MOM
+              </span>
+            )}
+            {showRev && (
+              <span
+                className="text-[8px] font-bold px-1 py-0.5 rounded leading-none"
+                style={{ backgroundColor: 'rgba(20,184,166,0.15)', color: '#14b8a6', border: '1px solid rgba(20,184,166,0.3)' }}
+              >
+                ▲ REV
+              </span>
+            )}
+          </div>
+        )}
         {stock.quote_time != null && (
           <div className="text-[9px] tabular-nums mt-0.5" style={{ color: '#363a45' }}>
             {fmtTime(stock.quote_time)} ET

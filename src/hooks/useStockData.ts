@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta, SearchResult } from '../types';
+import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta, SearchResult, TickerSignal, BacktestReport } from '../types';
 
 // Electron: window.electronAPI present → local Python server
 // Web (Vercel): VITE_API_URL env var set to Railway URL
@@ -293,4 +293,76 @@ export function useTickerSearch(query: string) {
   }, [query]);
 
   return { result, loading };
+}
+
+/**
+ * Polls GET /signals every 60 seconds.
+ * Returns live TickerSignal[] for all 11 universe tickers.
+ */
+export function useSignals() {
+  const [signals, setSignals] = useState<TickerSignal[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSignals = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/signals`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: TickerSignal[] = await res.json();
+      setSignals(data);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to fetch signals');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSignals();
+    const interval = setInterval(fetchSignals, 60_000);
+    return () => clearInterval(interval);
+  }, [fetchSignals]);
+
+  return { signals, loading, error };
+}
+
+/**
+ * Fetches GET /backtest/{strategy} on demand.
+ * Call `run()` to trigger the fetch (it is intentionally NOT automatic).
+ * strategy: 'momentum' | 'mean_rev' | 'both'
+ */
+export function useBacktest(strategy: 'momentum' | 'mean_rev' | 'both') {
+  const [report, setReport] = useState<BacktestReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const run = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    setLoading(true);
+    setError(null);
+    setReport(null);
+    try {
+      const res = await fetch(`${API_BASE}/backtest/${strategy}`, {
+        signal: abortRef.current.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: BacktestReport = await res.json();
+      setReport(data);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      setError(e instanceof Error ? e.message : 'Backtest failed');
+    } finally {
+      setLoading(false);
+    }
+  }, [strategy]);
+
+  // Abort on unmount
+  useEffect(() => {
+    return () => abortRef.current?.abort();
+  }, []);
+
+  return { report, loading, error, run };
 }

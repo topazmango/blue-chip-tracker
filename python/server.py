@@ -12,7 +12,7 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, time as dtime
-from typing import Optional
+from typing import Optional, Literal
 
 try:
     from fastapi import FastAPI, HTTPException, Query
@@ -1011,6 +1011,100 @@ def get_meta(ticker: str):
         return {"ticker": ticker, "week52_high": None, "week52_low": None, "atr14": None}
 
 
+
+
+# ─── Quant model imports (lazy — only imported when endpoints are first hit) ──
+import importlib as _importlib
+_quant_engine = None
+_quant_backtest = None
+
+def _get_engine():  # type: ignore[return]
+    global _quant_engine
+    if _quant_engine is None:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(__file__))
+        _quant_engine = _importlib.import_module("quant.engine")
+    return _quant_engine
+
+def _get_backtest():  # type: ignore[return]
+    global _quant_backtest
+    if _quant_backtest is None:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(__file__))
+        _quant_backtest = _importlib.import_module("quant.backtest")
+    return _quant_backtest
+
+# ── Signals cache (60 s) — separate from engine-level cache ──────────────────
+_signals_resp_cache: Optional[tuple[float, list]] = None
+_SIGNALS_TTL = 60.0
+
+
+def _fetch_signals_sync() -> list:
+    """Fetch live signals for all universe tickers.  Runs in thread pool."""
+    eng = _get_engine()
+    return eng.get_live_signals()
+
+
+@app.get("/signals")
+async def get_signals():
+    """
+    Return live quant signals for all 11 universe tickers (both strategies).
+    Cached 60 seconds.
+    """
+    global _signals_resp_cache
+    now = time.monotonic()
+    if _signals_resp_cache is not None:
+        ts, data = _signals_resp_cache
+        if now - ts < _SIGNALS_TTL:
+            return data
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(_executor, _fetch_signals_sync)
+    except Exception as e:
+        logger.error(f"/signals error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    _signals_resp_cache = (now, result)
+    return result
+
+
+@app.get("/signals/{ticker}")
+async def get_signal_ticker(ticker: str):
+    """Return live signal detail for a single ticker in the universe."""
+    signals = await get_signals()
+    ticker = ticker.upper().strip()
+    for sig in signals:
+        if sig["ticker"] == ticker:
+            return sig
+    raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not in quant universe")
+
+
+def _run_backtest_sync(strategy: str) -> dict:
+    """Run walk-forward backtest synchronously in a thread pool worker."""
+    bt = _get_backtest()
+    return bt.run_backtest(strategy)
+
+
+@app.get("/backtest/{strategy}")
+async def get_backtest(strategy: str):
+    """
+    Run walk-forward backtest.
+    strategy: 'momentum' | 'mean_rev' | 'both'
+    Long-running (~10-30 s first call); cached for the rest of the calendar day.
+    """
+    valid: list[Literal["momentum", "mean_rev", "both"]] = ["momentum", "mean_rev", "both"]
+    if strategy not in valid:
+        raise HTTPException(status_code=400, detail=f"strategy must be one of: {valid}")
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(_executor, _run_backtest_sync, strategy)
+    except Exception as e:
+        logger.error(f"/backtest/{strategy} error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return result
 
 
 @app.get("/search/{ticker}")

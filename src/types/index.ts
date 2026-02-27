@@ -116,3 +116,62 @@ export interface SearchResult {
   sector: string;
   price: number;
 }
+
+// ── Quant model types ─────────────────────────────────────────────────────────
+
+export type SignalValue = 'BUY' | 'SELL' | 'NEUTRAL';
+
+/** Returned by GET /signals and GET /signals/{ticker} */
+export interface TickerSignal {
+  ticker: string;
+  /** Strategy A — Dual Momentum */
+  strategy_a: SignalValue;
+  /** Strategy B — RSI Mean Reversion */
+  strategy_b: SignalValue;
+  rsi14: number | null;
+  /** % above/below SMA50 */
+  sma50_rel: number | null;
+  /** % above/below SMA200 */
+  sma200_rel: number | null;
+  /** Unix timestamp of signal computation */
+  as_of: number;
+}
+
+export interface EquityPoint {
+  date: string;  // 'YYYY-MM-DD'
+  value: number;
+}
+
+/** One walk-forward fold result */
+export interface FoldResult {
+  fold: number;
+  is_start: string;
+  is_end: string;
+  os_start: string;
+  os_end: string;
+  is_cagr: number;
+  os_cagr: number;
+  is_sharpe: number;
+  os_sharpe: number;
+  os_max_dd: number;
+  os_win_rate: number;
+  os_trades: number;
+  os_benchmark_return: number;
+  equity_curve: EquityPoint[];
+}
+
+/** Full walk-forward backtest report — returned by GET /backtest/{strategy} */
+export interface BacktestReport {
+  strategy: string;
+  universe: string[];
+  folds: FoldResult[];
+  combined_os_cagr: number;
+  combined_os_sharpe: number;
+  combined_os_max_dd: number;
+  mean_is_sharpe: number;
+  mean_os_sharpe: number;
+  sharpe_degradation: number;
+  median_os_cagr: number;
+  combined_os_equity: EquityPoint[];
+  generated_at: number;
+}

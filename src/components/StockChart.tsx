@@ -4,7 +4,14 @@ import { useStockHistory, useEarnings, useSpyHistory, useStockMeta } from '../ho
 import ChartPane from './ChartPane';
 import TimeframeSelector from './TimeframeSelector';
 import IndicatorPanel from './IndicatorPanel';
-import { Loader2, AlertTriangle, BarChart2 } from 'lucide-react';
+import BacktestDrawer from './BacktestDrawer';
+import { Loader2, AlertTriangle, BarChart2, FlaskConical } from 'lucide-react';
+
+// Universe tickers that have backtest data available
+const QUANT_UNIVERSE = new Set([
+  'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL',
+  'META', 'AVGO', 'AMD', 'CRM', 'ORCL', 'NOW',
+]);
 
 interface Props {
   stock: StockInfo | null;
@@ -87,12 +94,18 @@ function TickCamera({ tickAge, pollMs }: { tickAge: number; pollMs: number }) {
 export default function StockChart({ stock, liveCandle, isLive, chartType, activeTool, onToolChange, chartActionsRef, alerts, onAlertAdd, onAlertTriggered }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>('3M');
   const [showPrePost, setShowPrePost] = useState(false);
+  const [showBacktest, setShowBacktest] = useState(false);
   const [indicators, setIndicators] = useState<IndicatorSettings>({
     sma20: false, sma50: true, sma200: false, bollingerBands: false,
     rsi: false, volume: true,
     macd: false, volumeProfile: false, supportResistance: false,
     relativeStrength: false, earningsDates: false, week52HighLow: false,
   });
+
+  // Close backtest drawer when ticker changes
+  useEffect(() => {
+    setShowBacktest(false);
+  }, [stock?.ticker]);
 
   // ChartPane exposes actions via forwardRef; wire to the shared ref
   const chartPaneRef = useRef<ChartActions | null>(null);
@@ -132,6 +145,8 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
   const spyCandles  = useSpyHistory(timeframe);
   const earningsDates = useEarnings(stock?.ticker ?? null);
   const meta = useStockMeta(stock?.ticker ?? null);
+
+  const inQuantUniverse = stock != null && QUANT_UNIVERSE.has(stock.ticker);
 
   if (!stock) {
     return (
@@ -241,9 +256,29 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
         )}
         <div className="w-px h-4 flex-shrink-0" style={{ backgroundColor: '#2a2e39' }} />
         <IndicatorPanel settings={indicators} onChange={setIndicators} meta={meta} />
+
+        {/* Spacer pushes backtest button to the right */}
+        <div className="flex-1" />
+
+        {/* Backtest button — only shown for universe tickers */}
+        {inQuantUniverse && (
+          <button
+            onClick={() => setShowBacktest((v) => !v)}
+            title="Open walk-forward backtest drawer"
+            className="flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors"
+            style={{
+              backgroundColor: showBacktest ? '#2962ff22' : 'transparent',
+              color: showBacktest ? '#2962ff' : '#4c525e',
+              border: `1px solid ${showBacktest ? '#2962ff55' : '#2a2e39'}`,
+            }}
+          >
+            <FlaskConical size={11} />
+            Backtest
+          </button>
+        )}
       </div>
 
-      {/* ── Chart area ── */}
+      {/* ── Chart area (relative so BacktestDrawer can position absolutely) ── */}
       <div className="flex-1 relative min-h-0">
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center z-10" style={{ backgroundColor: '#13172290' }}>
@@ -289,6 +324,15 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
           <div className="absolute inset-0 flex items-center justify-center">
             <p className="text-xs" style={{ color: '#4c525e' }}>No data available</p>
           </div>
+        )}
+
+        {/* Backtest slide-out drawer — rendered inside the chart area */}
+        {inQuantUniverse && (
+          <BacktestDrawer
+            ticker={stock.ticker}
+            open={showBacktest}
+            onClose={() => setShowBacktest(false)}
+          />
         )}
       </div>
     </div>
