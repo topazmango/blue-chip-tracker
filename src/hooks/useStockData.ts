@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { StockInfo, HistoryResponse, Timeframe, QuoteData } from '../types';
+import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta } from '../types';
 
 // Electron: window.electronAPI present → local Python server
 // Web (Vercel): VITE_API_URL env var set to Railway URL
@@ -149,4 +149,66 @@ export function useRealtimeQuotes(
   }, [poll, interval]);
 
   return { stocks, liveCandle, isLive };
+}
+
+/** Fetch earnings dates for a ticker. Re-fetches when ticker changes. */
+export function useEarnings(ticker: string | null) {
+  const [earnings, setEarnings] = useState<EarningDate[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    if (!ticker) {
+      Promise.resolve().then(() => setEarnings([]));
+      return () => abortRef.current?.abort();
+    }
+    fetch(`${API_BASE}/earnings/${ticker}`, { signal: abortRef.current.signal })
+      .then((r) => r.json())
+      .then((data: EarningDate[]) => setEarnings(data))
+      .catch((e) => { if (e.name !== 'AbortError') setEarnings([]); });
+    return () => abortRef.current?.abort();
+  }, [ticker]);
+
+  return earnings;
+}
+
+/** Fetch SPY history for relative-strength overlay. */
+export function useSpyHistory(timeframe: Timeframe) {
+  const [candles, setCandles] = useState<{ time: number; close: number }[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    fetch(`${API_BASE}/spy-history?timeframe=${timeframe}`, { signal: abortRef.current.signal })
+      .then((r) => r.json())
+      .then((data: { candles: { time: number; close: number }[] }) => setCandles(data.candles ?? []))
+      .catch((e) => { if (e.name !== 'AbortError') setCandles([]); });
+    return () => abortRef.current?.abort();
+  }, [timeframe]);
+
+  return candles;
+}
+
+/** Fetch stock meta (52-week hi/lo, ATR14). */
+export function useStockMeta(ticker: string | null) {
+  const [meta, setMeta] = useState<StockMeta | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    if (!ticker) {
+      Promise.resolve().then(() => setMeta(null));
+      return () => abortRef.current?.abort();
+    }
+    fetch(`${API_BASE}/meta/${ticker}`, { signal: abortRef.current.signal })
+      .then((r) => r.json())
+      .then((data: StockMeta) => setMeta(data))
+      .catch((e) => { if (e.name !== 'AbortError') setMeta(null); });
+    return () => abortRef.current?.abort();
+  }, [ticker]);
+
+  return meta;
 }

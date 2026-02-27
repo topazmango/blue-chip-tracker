@@ -78,15 +78,17 @@ DEFAULT_STOCKS = [
 ]
 
 # Timeframe -> (period, interval) mapping
+# Period is set to the maximum available for each interval so all historical
+# data is returned; the frontend sets the default visible window.
 TIMEFRAME_MAP = {
-    "1D":  ("1d",  "5m"),
-    "1W":  ("5d",  "30m"),
-    "1M":  ("1mo", "1d"),
-    "3M":  ("3mo", "1d"),
-    "6M":  ("6mo", "1d"),
-    "1Y":  ("1y",  "1d"),
-    "5Y":  ("5y",  "1wk"),
-    "ALL": ("max", "1mo"),
+    "1D":  ("60d",  "5m"),   # 5m data: yfinance allows up to 60d
+    "1W":  ("60d",  "30m"),  # 30m data: yfinance allows up to 60d
+    "1M":  ("max",  "1d"),
+    "3M":  ("max",  "1d"),
+    "6M":  ("max",  "1d"),
+    "1Y":  ("max",  "1d"),
+    "5Y":  ("max",  "1wk"),
+    "ALL": ("max",  "1mo"),
 }
 
 # ─── Alert configuration ──────────────────────────────────────────────────────
@@ -644,6 +646,154 @@ def get_quotes():
             logger.warning(f"/quotes error for {ticker}: {e}")
 
     return results
+
+
+@app.get("/earnings/{ticker}")
+def get_earnings(ticker: str):
+    """
+    Return past and upcoming earnings dates for a ticker.
+    Returns list of {date: ISO string, is_upcoming: bool}.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        cal = t.calendar
+        history_earnings = t.earnings_dates
+        results = []
+
+        # Past earnings from earnings_dates (index is datetime)
+        if history_earnings is not None and not history_earnings.empty:
+            now = pd.Timestamp.now(tz="UTC")
+            for dt_idx in history_earnings.index:
+                try:
+                    if hasattr(dt_idx, 'timestamp'):
+                        ts = int(dt_idx.timestamp())
+                        is_upcoming = dt_idx > now
+                    else:
+                        ts_obj = pd.Timestamp(dt_idx)
+                        ts = int(ts_obj.timestamp())
+                        is_upcoming = ts_obj > now
+                    results.append({"time": ts, "is_upcoming": bool(is_upcoming)})
+                except Exception:
+                    pass
+
+        # Next earnings from calendar (may have more precise date)
+        if cal is not None:
+            earn_key = None
+            for k in ["Earnings Date", "earnings_date", "earningsDate"]:
+                if k in cal:
+                    earn_key = k
+                    break
+            if earn_key:
+                val = cal[earn_key]
+                try:
+                    dates = val if hasattr(val, '__iter__') and not isinstance(val, str) else [val]
+                    for d in dates:
+                        if d is None:
+                            continue
+                        ts_obj = pd.Timestamp(d)
+                        ts = int(ts_obj.timestamp())
+                        # Avoid duplicates
+                        if not any(abs(r["time"] - ts) < 86400 * 3 for r in results):
+                            results.append({"time": ts, "is_upcoming": True})
+                except Exception:
+                    pass
+
+        results.sort(key=lambda x: x["time"])
+        return results
+    except Exception as e:
+        logger.warning(f"earnings error for {ticker}: {e}")
+        return []
+
+
+@app.get("/spy-history")
+def get_spy_history(timeframe: str = Query("3M")):
+    """Return SPY OHLCV history for relative-strength calculations."""
+    if timeframe not in TIMEFRAME_MAP:
+        raise HTTPException(status_code=400, detail=f"Invalid timeframe: {timeframe}")
+    period, interval = TIMEFRAME_MAP[timeframe]
+    try:
+        t = yf.Ticker("SPY")
+        df = t.history(period=period, interval=interval, auto_adjust=True)
+    except Exception as e:
+        logger.error(f"spy-history fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if df.empty:
+        return {"candles": []}
+
+    df = df.dropna(subset=["Close"])
+    candles = []
+    for ts, row in df.iterrows():
+        if hasattr(ts, 'timestamp'):
+            time_val = int(ts.timestamp())
+        else:
+            time_val = int(pd.Timestamp(ts).timestamp())
+        candles.append({
+            "time":   time_val,
+            "open":   round(float(row["Open"]),  2),
+            "high":   round(float(row["High"]),  2),
+            "low":    round(float(row["Low"]),   2),
+            "close":  round(float(row["Close"]), 2),
+            "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
+        })
+    candles.sort(key=lambda x: x["time"])
+    return {"candles": candles}
+
+
+@app.get("/meta/{ticker}")
+def get_meta(ticker: str):
+    """
+    Return metadata: 52-week high/low, ATR(14), current price.
+    Used for 52wk hi/lo lines and ATR display.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+
+        # 52-week hi/lo from info (fast path)
+        week52_high = info.get("fiftyTwoWeekHigh") or info.get("52WeekHigh")
+        week52_low  = info.get("fiftyTwoWeekLow")  or info.get("52WeekLow")
+
+        # ATR(14) from daily data
+        atr_value: Optional[float] = None
+        try:
+            df = t.history(period="60d", interval="1d", auto_adjust=True)
+            if not df.empty and len(df) >= 15:
+                highs  = df["High"].values
+                lows   = df["Low"].values
+                closes = df["Close"].values
+                trs = []
+                for i in range(1, len(df)):
+                    tr = max(
+                        highs[i] - lows[i],
+                        abs(highs[i] - closes[i - 1]),
+                        abs(lows[i]  - closes[i - 1]),
+                    )
+                    trs.append(tr)
+                # Wilder smoothing over 14 periods
+                atr = sum(trs[:14]) / 14
+                for tr in trs[14:]:
+                    atr = (atr * 13 + tr) / 14
+                atr_value = round(float(atr), 2)
+
+                # Fallback 52wk from history if info didn't have it
+                if week52_high is None:
+                    year_df = t.history(period="1y", interval="1d", auto_adjust=True)
+                    if not year_df.empty:
+                        week52_high = round(float(year_df["High"].max()), 2)
+                        week52_low  = round(float(year_df["Low"].min()),  2)
+        except Exception as e:
+            logger.warning(f"ATR calc error for {ticker}: {e}")
+
+        return {
+            "ticker":      ticker,
+            "week52_high": round(float(week52_high), 2) if week52_high else None,
+            "week52_low":  round(float(week52_low),  2) if week52_low  else None,
+            "atr14":       atr_value,
+        }
+    except Exception as e:
+        logger.warning(f"meta error for {ticker}: {e}")
+        return {"ticker": ticker, "week52_high": None, "week52_low": None, "atr14": None}
 
 
 if __name__ == "__main__":

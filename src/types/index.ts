@@ -54,4 +54,51 @@ export interface IndicatorSettings {
   bollingerBands: boolean;
   rsi: boolean;
   volume: boolean;
+  macd: boolean;
+  volumeProfile: boolean;
+  supportResistance: boolean;
+  relativeStrength: boolean;
+  earningsDates: boolean;
+  week52HighLow: boolean;
+}
+
+export type ChartType = 'candlestick' | 'bar' | 'line' | 'area' | 'baseline';
+
+export type DrawingTool =
+  | 'cursor'
+  | 'crosshair'
+  | 'trendline'
+  | 'hline'
+  | 'rectangle'
+  | 'ellipse'
+  | 'text'
+  | 'freehand'
+  | 'fibonacci'
+  | 'alert';
+
+export interface ChartActions {
+  zoomIn: () => void;
+  zoomOut: () => void;
+  fitContent: () => void;
+  reset: () => void;
+  screenshot: () => void;
+}
+
+export interface EarningDate {
+  time: number;        // Unix timestamp seconds
+  is_upcoming: boolean;
+}
+
+export interface StockMeta {
+  ticker: string;
+  week52_high: number | null;
+  week52_low: number | null;
+  atr14: number | null;
+}
+
+export interface PriceAlert {
+  id: string;
+  ticker: string;
+  price: number;
+  triggered: boolean;
 }

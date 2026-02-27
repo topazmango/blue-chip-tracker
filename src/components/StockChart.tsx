@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import type { StockInfo, Timeframe, IndicatorSettings, Candle } from '../types';
-import { useStockHistory } from '../hooks/useStockData';
+import { useState, useRef } from 'react';
+import type { StockInfo, Timeframe, IndicatorSettings, Candle, ChartType, DrawingTool, ChartActions, PriceAlert } from '../types';
+import { useStockHistory, useEarnings, useSpyHistory, useStockMeta } from '../hooks/useStockData';
 import ChartPane from './ChartPane';
 import TimeframeSelector from './TimeframeSelector';
 import IndicatorPanel from './IndicatorPanel';
@@ -10,6 +10,13 @@ interface Props {
   stock: StockInfo | null;
   liveCandle?: Candle | null;
   isLive?: boolean;
+  chartType: ChartType;
+  activeTool: DrawingTool;
+  onToolChange: (tool: DrawingTool) => void;
+  chartActionsRef: React.RefObject<ChartActions | null>;
+  alerts: PriceAlert[];
+  onAlertAdd: (ticker: string, price: number) => void;
+  onAlertTriggered: (id: string) => void;
 }
 
 function fmt(n: number) {
@@ -24,13 +31,28 @@ function fmtLarge(n: number) {
   return n.toString();
 }
 
-export default function StockChart({ stock, liveCandle, isLive }: Props) {
+export default function StockChart({ stock, liveCandle, isLive, chartType, activeTool, onToolChange, chartActionsRef, alerts, onAlertAdd, onAlertTriggered }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>('3M');
   const [indicators, setIndicators] = useState<IndicatorSettings>({
-    sma20: false, sma50: true, sma200: false, bollingerBands: false, rsi: false, volume: true,
+    sma20: false, sma50: true, sma200: false, bollingerBands: false,
+    rsi: false, volume: true,
+    macd: false, volumeProfile: false, supportResistance: false,
+    relativeStrength: false, earningsDates: false, week52HighLow: false,
   });
 
+  // ChartPane exposes actions via forwardRef; wire to the shared ref
+  const chartPaneRef = useRef<ChartActions | null>(null);
+  const setRef = (actions: ChartActions | null) => {
+    chartPaneRef.current = actions;
+    // chartActionsRef is a MutableRefObject passed from App — safe to write
+    const mutableRef = chartActionsRef as { current: ChartActions | null };
+    mutableRef.current = actions;
+  };
+
   const { history, loading, error } = useStockHistory(stock?.ticker ?? null, timeframe);
+  const spyCandles  = useSpyHistory(timeframe);
+  const earningsDates = useEarnings(stock?.ticker ?? null);
+  const meta = useStockMeta(stock?.ticker ?? null);
 
   if (!stock) {
     return (
@@ -50,15 +72,17 @@ export default function StockChart({ stock, liveCandle, isLive }: Props) {
   const extUp   = (stock.ext_change_pct ?? 0) >= 0;
   const extColor = extUp ? '#26a69a' : '#ef5350';
 
+  // Alerts scoped to the current ticker only
+  const tickerAlerts = alerts.filter((a) => a.ticker === stock.ticker);
+
   return (
     <div className="flex-1 flex flex-col min-w-0 h-full" style={{ backgroundColor: '#131722' }}>
 
-      {/* ── Top symbol bar (like TV's symbol header) ── */}
+      {/* ── Top symbol bar ── */}
       <div
         className="flex items-center gap-4 px-4 h-[42px] flex-shrink-0 border-b"
         style={{ borderColor: '#2a2e39', backgroundColor: '#131722' }}
       >
-        {/* Symbol + name */}
         <div className="flex items-center gap-2">
           <span className="text-sm font-bold tracking-wide" style={{ color: '#d1d4dc' }}>{stock.ticker}</span>
           <span className="text-xs" style={{ color: '#787b86' }}>{stock.name}</span>
@@ -73,10 +97,8 @@ export default function StockChart({ stock, liveCandle, isLive }: Props) {
           )}
         </div>
 
-        {/* Divider */}
         <div className="w-px h-4" style={{ backgroundColor: '#2a2e39' }} />
 
-        {/* Regular session price info */}
         <div className="flex items-center gap-3 text-xs tabular-nums">
           <span className="font-semibold text-sm" style={{ color: '#d1d4dc' }}>${fmt(stock.price)}</span>
           <span className="font-medium" style={{ color: changeColor }}>
@@ -90,9 +112,16 @@ export default function StockChart({ stock, liveCandle, isLive }: Props) {
           <span style={{ color: '#d1d4dc' }}>{fmtLarge(stock.volume)}</span>
           <span style={{ color: '#4c525e' }}>PC</span>
           <span style={{ color: '#d1d4dc' }}>{fmt(stock.prev_close)}</span>
+          {meta?.week52_high != null && (
+            <>
+              <span style={{ color: '#4c525e' }}>52H</span>
+              <span style={{ color: '#26a69a' }}>{fmt(meta.week52_high)}</span>
+              <span style={{ color: '#4c525e' }}>52L</span>
+              <span style={{ color: '#ef5350' }}>{fmt(meta.week52_low!)}</span>
+            </>
+          )}
         </div>
 
-        {/* Extended hours block — only shown when pre/post data is available */}
         {hasExt && (
           <>
             <div className="w-px h-4" style={{ backgroundColor: '#2a2e39' }} />
@@ -119,7 +148,7 @@ export default function StockChart({ stock, liveCandle, isLive }: Props) {
       >
         <TimeframeSelector selected={timeframe} onChange={setTimeframe} />
         <div className="w-px h-4 flex-shrink-0" style={{ backgroundColor: '#2a2e39' }} />
-        <IndicatorPanel settings={indicators} onChange={setIndicators} />
+        <IndicatorPanel settings={indicators} onChange={setIndicators} meta={meta} />
       </div>
 
       {/* ── Chart area ── */}
@@ -145,10 +174,21 @@ export default function StockChart({ stock, liveCandle, isLive }: Props) {
 
         {history && history.candles.length > 0 && (
           <ChartPane
+            ref={setRef}
             candles={history.candles}
             indicators={indicators}
             timeframe={timeframe}
+            chartType={chartType}
+            activeTool={activeTool}
+            onToolChange={onToolChange}
             liveCandle={timeframe === '1D' ? liveCandle : null}
+            ticker={stock.ticker}
+            spyCandles={spyCandles}
+            earningsDates={earningsDates}
+            meta={meta}
+            alerts={tickerAlerts}
+            onAlertAdd={(price) => onAlertAdd(stock.ticker, price)}
+            onAlertTriggered={onAlertTriggered}
           />
         )}
 
