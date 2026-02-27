@@ -38,7 +38,7 @@ export function useStockList(refreshInterval = 60000) {
   return { stocks, loading, error, lastUpdated, refresh: fetchStocks };
 }
 
-export function useStockHistory(ticker: string | null, timeframe: Timeframe) {
+export function useStockHistory(ticker: string | null, timeframe: Timeframe, prepost = false) {
   const [history, setHistory] = useState<HistoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +55,8 @@ export function useStockHistory(ticker: string | null, timeframe: Timeframe) {
     setLoading(true);
     setError(null);
 
-    fetch(`${API_BASE}/history/${ticker}?timeframe=${timeframe}`, {
+    const url = `${API_BASE}/history/${ticker}?timeframe=${timeframe}&prepost=${prepost}`;
+    fetch(url, {
       signal: abortRef.current.signal,
     })
       .then((res) => {
@@ -73,7 +74,7 @@ export function useStockHistory(ticker: string | null, timeframe: Timeframe) {
       });
 
     return () => abortRef.current?.abort();
-  }, [ticker, timeframe]);
+  }, [ticker, timeframe, prepost]);
 
   return { history, loading, error };
 }

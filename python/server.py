@@ -98,6 +98,7 @@ DISCORD_WEBHOOK_URL: Optional[str] = os.environ.get("DISCORD_WEBHOOK_URL")
 ALERT_THRESHOLD: float = float(os.environ.get("ALERT_THRESHOLD", "5.0"))
 ALERT_POLL_SECONDS: int = 30          # How often to check (seconds)
 ALERT_COOLDOWN_SECONDS: int = 300     # Minimum gap between alerts for the same ticker (5 min)
+HOURLY_MOVERS_THRESHOLD: float = float(os.environ.get("HOURLY_MOVERS_THRESHOLD", "5.0"))  # Min |change_pct| to appear in hourly digest
 ET = pytz.timezone("America/New_York")
 MARKET_OPEN  = dtime(9, 30)
 MARKET_CLOSE = dtime(16, 0)
@@ -169,35 +170,75 @@ def _fetch_quotes_sync() -> dict:
     return results
 
 
-async def _send_discord_alert(
+async def _send_discord_alert_batch(
     client: httpx.AsyncClient,
-    ticker: str,
-    name: str,
-    price: float,
-    prev_close: float,
-    change_pct: float,
+    movers: list[dict],
 ) -> None:
-    """POST a rich embed to the configured Discord webhook."""
-    if not DISCORD_WEBHOOK_URL:
+    """
+    POST a single rich embed to the configured Discord webhook summarising all
+    current intraday movers as a formatted chart/table.
+
+    Each entry in `movers` must have keys:
+        ticker, name, price, prev_close, change_pct
+    Sorted by |change_pct| descending before display.
+    """
+    if not DISCORD_WEBHOOK_URL or not movers:
         return
 
-    direction = "up" if change_pct >= 0 else "down"
-    arrow     = "▲" if change_pct >= 0 else "▼"
-    color     = 0x2ECC71 if change_pct >= 0 else 0xE74C3C  # green / red
-    sign      = "+" if change_pct >= 0 else ""
-    now_et    = datetime.now(ET).strftime("%H:%M ET")
+    movers_sorted = sorted(movers, key=lambda x: abs(x["change_pct"]), reverse=True)
+
+    gainers = [m for m in movers_sorted if m["change_pct"] >= 0]
+    losers  = [m for m in movers_sorted if m["change_pct"] <  0]
+
+    now_et  = datetime.now(ET).strftime("%H:%M ET")
+
+    # ── Build table rows ─────────────────────────────────────────────────────
+    # Each row: `TICK  ` ▲/▼ +X.XX%  $PPP.PP  (+$CC.CC)
+    def fmt_mover(m: dict) -> str:
+        arrow  = "▲" if m["change_pct"] >= 0 else "▼"
+        sign   = "+" if m["change_pct"] >= 0 else ""
+        dollar_chg = m["price"] - m["prev_close"]
+        d_sign = "+" if dollar_chg >= 0 else ""
+        return (
+            f"`{m['ticker']:6s}` {arrow} {sign}{m['change_pct']:.2f}%"
+            f"  ${m['price']:.2f}  ({d_sign}${dollar_chg:.2f})"
+        )
+
+    gainers_txt = "\n".join(fmt_mover(m) for m in gainers) or "_None_"
+    losers_txt  = "\n".join(fmt_mover(m) for m in losers)  or "_None_"
+
+    # Colour: green if more gainers, red if more losers, orange if equal
+    if len(gainers) > len(losers):
+        color = 0x2ECC71
+    elif len(losers) > len(gainers):
+        color = 0xE74C3C
+    else:
+        color = 0xE67E22
+
+    total    = len(movers_sorted)
+    n_up     = len(gainers)
+    n_down   = len(losers)
+    top      = movers_sorted[0]
+    top_sign = "+" if top["change_pct"] >= 0 else ""
+
+    description = (
+        f"**{n_up} up / {n_down} down** across {total} alert{'s' if total != 1 else ''}\n"
+        f"Biggest mover: **{top['ticker']}** {top_sign}{top['change_pct']:.2f}%"
+    )
+
+    fields = []
+    if gainers:
+        fields.append({"name": "📈 Gainers", "value": gainers_txt, "inline": True})
+    if losers:
+        fields.append({"name": "📉 Losers",  "value": losers_txt,  "inline": True})
 
     embed = {
-        "title":       f"{arrow} {ticker}  {sign}{change_pct:.2f}%",
-        "description": f"**{name}** is {direction} **{sign}{change_pct:.2f}%** on the day",
+        "title":       f"Intraday Movers  •  {now_et}",
+        "description": description,
         "color":       color,
-        "fields": [
-            {"name": "Current Price",  "value": f"${price:.2f}",      "inline": True},
-            {"name": "Prev Close",     "value": f"${prev_close:.2f}", "inline": True},
-            {"name": "Change",         "value": f"{sign}${price - prev_close:.2f}", "inline": True},
-        ],
-        "footer": {"text": f"S&P 500 Alert  •  {now_et}"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "fields":      fields,
+        "footer":      {"text": f"S&P 500 Alerts  •  threshold ≥{ALERT_THRESHOLD}%"},
+        "timestamp":   datetime.now(timezone.utc).isoformat(),
     }
 
     payload = {
@@ -206,20 +247,22 @@ async def _send_discord_alert(
         "embeds":     [embed],
     }
 
+    tickers_str = ", ".join(m["ticker"] for m in movers_sorted)
     try:
         resp = await client.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
         if resp.status_code not in (200, 204):
-            logger.warning(f"Discord webhook returned {resp.status_code} for {ticker}")
+            logger.warning(f"Discord batch alert webhook returned {resp.status_code}")
         else:
-            logger.info(f"Discord alert sent: {ticker} {sign}{change_pct:.2f}%")
+            logger.info(f"Discord batch alert sent: {tickers_str}")
     except Exception as e:
-        logger.error(f"Failed to send Discord alert for {ticker}: {e}")
+        logger.error(f"Failed to send Discord batch alert: {e}")
 
 
 async def _alert_loop() -> None:
     """
     Background coroutine: polls every ALERT_POLL_SECONDS during market hours.
-    Fires a Discord alert for every stock whose |change_pct| >= ALERT_THRESHOLD.
+    Collects all stocks whose |change_pct| >= ALERT_THRESHOLD that are not in
+    cooldown, then fires a single batched Discord chart message for the whole set.
     """
     if not DISCORD_WEBHOOK_URL:
         logger.warning(
@@ -249,24 +292,27 @@ async def _alert_loop() -> None:
                 continue
 
             now_mono = time.monotonic()
+            batch: list[dict] = []
             for ticker, q in quotes.items():
                 if abs(q["change_pct"]) >= ALERT_THRESHOLD:
                     last_sent = _last_alert_sent.get(ticker, 0.0)
                     if now_mono - last_sent >= ALERT_COOLDOWN_SECONDS:
                         _last_alert_sent[ticker] = now_mono
-                        await _send_discord_alert(
-                            client,
-                            ticker=ticker,
-                            name=q["name"],
-                            price=q["price"],
-                            prev_close=q["prev_close"],
-                            change_pct=q["change_pct"],
-                        )
+                        batch.append({
+                            "ticker":     ticker,
+                            "name":       q["name"],
+                            "price":      q["price"],
+                            "prev_close": q["prev_close"],
+                            "change_pct": q["change_pct"],
+                        })
                     else:
                         secs_remaining = int(ALERT_COOLDOWN_SECONDS - (now_mono - last_sent))
                         logger.debug(
                             f"Alert suppressed for {ticker} — cooldown {secs_remaining}s remaining"
                         )
+
+            if batch:
+                await _send_discord_alert_batch(client, batch)
 
 
 def _fetch_daily_closes_sync() -> list:
@@ -376,6 +422,139 @@ async def _send_daily_close_summary(client: httpx.AsyncClient) -> None:
         logger.error(f"Failed to send daily close summary: {e}")
 
 
+async def _send_hourly_movers(client: httpx.AsyncClient) -> None:
+    """
+    Fetch all 30 stocks and POST a Discord embed listing every stock whose
+    |change_pct| >= HOURLY_MOVERS_THRESHOLD for the day.
+    Sends a "no big movers" note when nothing qualifies.
+    """
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    loop = asyncio.get_event_loop()
+    try:
+        quotes = await loop.run_in_executor(_executor, _fetch_quotes_sync)
+    except Exception as e:
+        logger.error(f"Hourly movers fetch error: {e}")
+        return
+
+    movers = [
+        {
+            "ticker":     ticker,
+            "name":       q["name"],
+            "price":      q["price"],
+            "prev_close": q["prev_close"],
+            "change_pct": q["change_pct"],
+        }
+        for ticker, q in quotes.items()
+        if abs(q["change_pct"]) >= HOURLY_MOVERS_THRESHOLD
+    ]
+    movers.sort(key=lambda x: x["change_pct"], reverse=True)
+
+    gainers = [m for m in movers if m["change_pct"] >= 0]
+    losers  = [m for m in movers if m["change_pct"] <  0]
+
+    now_et   = datetime.now(ET)
+    time_str = now_et.strftime("%I:%M %p ET")
+    date_str = now_et.strftime("%A, %B %-d %Y")
+
+    def fmt_row(m: dict) -> str:
+        arrow  = "▲" if m["change_pct"] >= 0 else "▼"
+        sign   = "+" if m["change_pct"] >= 0 else ""
+        d      = m["price"] - m["prev_close"]
+        ds     = "+" if d >= 0 else ""
+        return (
+            f"`{m['ticker']:6s}` {arrow} {sign}{m['change_pct']:.2f}%"
+            f"  ${m['price']:.2f}  ({ds}${d:.2f})"
+        )
+
+    if movers:
+        gainers_txt = "\n".join(fmt_row(m) for m in gainers) or "_None_"
+        losers_txt  = "\n".join(fmt_row(m) for m in reversed(losers)) or "_None_"
+
+        color = 0x2ECC71 if len(gainers) >= len(losers) else 0xE74C3C
+
+        best  = movers[0]
+        worst = movers[-1]
+        b_sign = "+" if best["change_pct"] >= 0 else ""
+        description = (
+            f"**{len(gainers)} up / {len(losers)} down** moving ≥{HOURLY_MOVERS_THRESHOLD}%\n"
+            f"Biggest: **{best['ticker']}** {b_sign}{best['change_pct']:.2f}%"
+            + (f"   Worst: **{worst['ticker']}** {worst['change_pct']:.2f}%" if worst is not best else "")
+        )
+
+        fields = []
+        if gainers:
+            fields.append({"name": "📈 Gainers", "value": gainers_txt, "inline": True})
+        if losers:
+            fields.append({"name": "📉 Losers",  "value": losers_txt,  "inline": True})
+    else:
+        color       = 0x95A5A6   # grey — nothing notable
+        description = f"No stocks in the watchlist are moving ≥{HOURLY_MOVERS_THRESHOLD}% today."
+        fields      = []
+
+    payload = {
+        "username":   "Hourly Movers",
+        "avatar_url": "https://cdn-icons-png.flaticon.com/512/4305/4305512.png",
+        "embeds": [{
+            "title":       f"Hourly Movers — {date_str}",
+            "description": description,
+            "color":       color,
+            "fields":      fields,
+            "footer":      {"text": f"S&P 500 Top 30  •  threshold ≥{HOURLY_MOVERS_THRESHOLD}%  •  {time_str}"},
+            "timestamp":   datetime.now(timezone.utc).isoformat(),
+        }],
+    }
+
+    try:
+        resp = await client.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        if resp.status_code not in (200, 204):
+            logger.warning(f"Hourly movers webhook returned {resp.status_code}")
+        else:
+            tickers_str = ", ".join(m["ticker"] for m in movers) if movers else "none"
+            logger.info(f"Hourly movers sent to Discord: {tickers_str}")
+    except Exception as e:
+        logger.error(f"Failed to send hourly movers: {e}")
+
+
+async def _hourly_movers_loop() -> None:
+    """
+    Background coroutine: fires _send_hourly_movers once per clock-hour during
+    market hours (09:00–16:00 ET, Mon–Fri). Ticks every 30 s so it never misses
+    the top of an hour by more than 30 s.
+    """
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    logger.info(
+        f"Hourly movers scheduler started — threshold ≥{HOURLY_MOVERS_THRESHOLD}%, "
+        "fires at the top of each market hour Mon–Fri 09:00–16:00 ET."
+    )
+
+    last_fired_hour: Optional[int] = None   # (day_ordinal * 24 + hour) of last send
+
+    async with httpx.AsyncClient() as client:
+        while True:
+            await asyncio.sleep(30)
+
+            now_et = datetime.now(ET)
+
+            # Only fire on weekdays inside/around market hours
+            if now_et.weekday() >= 5:
+                continue
+            if not (dtime(9, 0) <= now_et.time() <= dtime(16, 5)):
+                continue
+
+            hour_key = now_et.toordinal() * 24 + now_et.hour
+            if last_fired_hour == hour_key:
+                continue
+
+            # Fire within the first 2 minutes of the hour (or 09:00 pre-open)
+            if now_et.minute <= 2:
+                last_fired_hour = hour_key
+                await _send_hourly_movers(client)
+
+
 async def _daily_close_loop() -> None:
     """
     Background coroutine: waits until 16:00 ET on each weekday, then fires
@@ -408,6 +587,7 @@ async def _daily_close_loop() -> None:
 async def startup_event() -> None:
     asyncio.create_task(_alert_loop())
     asyncio.create_task(_daily_close_loop())
+    asyncio.create_task(_hourly_movers_loop())
 
 
 # ─── API Endpoints ────────────────────────────────────────────────────────────
@@ -494,10 +674,23 @@ def get_stocks():
     return results
 
 
+def _candle_session(ts: pd.Timestamp) -> str:
+    """Classify a timestamp into 'pre', 'regular', or 'post' ET session."""
+    et = pytz.timezone("America/New_York")
+    t = ts.astimezone(et).time()
+    if dtime(9, 30) <= t < dtime(16, 0):
+        return "regular"
+    elif dtime(4, 0) <= t < dtime(9, 30):
+        return "pre"
+    else:
+        return "post"
+
+
 @app.get("/history/{ticker}")
 def get_history(
     ticker: str,
     timeframe: str = Query("1M", description="Timeframe key: 1D, 1W, 1M, 3M, 6M, 1Y, 5Y, ALL"),
+    prepost: bool = Query(False, description="Include pre/post market candles (only meaningful for intraday timeframes)"),
 ):
     """Return OHLCV history for a ticker."""
     if timeframe not in TIMEFRAME_MAP:
@@ -505,9 +698,13 @@ def get_history(
 
     period, interval = TIMEFRAME_MAP[timeframe]
 
+    # Pre/post market only applies to intraday intervals
+    intraday = interval.endswith("m") or interval.endswith("h")
+    fetch_prepost = prepost and intraday
+
     try:
         t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval, auto_adjust=True)
+        df = t.history(period=period, interval=interval, auto_adjust=True, prepost=fetch_prepost)
     except Exception as e:
         logger.error(f"Failed to fetch history for {ticker}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -525,23 +722,27 @@ def get_history(
         else:
             time_val = int(pd.Timestamp(ts).timestamp())
 
+        session = _candle_session(ts) if fetch_prepost else "regular"
+
         candles.append({
-            "time": time_val,
-            "open":   round(float(row["Open"]),   2),
-            "high":   round(float(row["High"]),   2),
-            "low":    round(float(row["Low"]),    2),
-            "close":  round(float(row["Close"]),  2),
-            "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
+            "time":    time_val,
+            "open":    round(float(row["Open"]),   2),
+            "high":    round(float(row["High"]),   2),
+            "low":     round(float(row["Low"]),    2),
+            "close":   round(float(row["Close"]),  2),
+            "volume":  int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
+            "session": session,
         })
 
     # Sort by time ascending
     candles.sort(key=lambda x: x["time"])
 
     return {
-        "ticker": ticker,
+        "ticker":   ticker,
         "timeframe": timeframe,
         "interval": interval,
-        "candles": candles,
+        "prepost":  fetch_prepost,
+        "candles":  candles,
     }
 
 

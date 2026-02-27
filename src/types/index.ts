@@ -24,12 +24,16 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
+  /** Session classification — only present when prepost=true was requested */
+  session?: 'pre' | 'regular' | 'post';
 }
 
 export interface HistoryResponse {
   ticker: string;
   timeframe: string;
   interval: string;
+  /** True when extended-hours (pre/post market) candles are included */
+  prepost: boolean;
   candles: Candle[];
 }
 

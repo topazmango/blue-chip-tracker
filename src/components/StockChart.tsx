@@ -86,6 +86,7 @@ function TickCamera({ tickAge, pollMs }: { tickAge: number; pollMs: number }) {
 
 export default function StockChart({ stock, liveCandle, isLive, chartType, activeTool, onToolChange, chartActionsRef, alerts, onAlertAdd, onAlertTriggered }: Props) {
   const [timeframe, setTimeframe] = useState<Timeframe>('3M');
+  const [showPrePost, setShowPrePost] = useState(false);
   const [indicators, setIndicators] = useState<IndicatorSettings>({
     sma20: false, sma50: true, sma200: false, bollingerBands: false,
     rsi: false, volume: true,
@@ -124,7 +125,10 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
     return () => clearInterval(id);
   }, [isLive]);
 
-  const { history, loading, error } = useStockHistory(stock?.ticker ?? null, timeframe);
+  // Pre/post only makes sense for intraday timeframes (1D = 5m, 1W = 30m)
+  const intradayTimeframes: Timeframe[] = ['1D', '1W'];
+  const prepostActive = showPrePost && intradayTimeframes.includes(timeframe);
+  const { history, loading, error } = useStockHistory(stock?.ticker ?? null, timeframe, prepostActive);
   const spyCandles  = useSpyHistory(timeframe);
   const earningsDates = useEarnings(stock?.ticker ?? null);
   const meta = useStockMeta(stock?.ticker ?? null);
@@ -220,6 +224,22 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
       >
         <TimeframeSelector selected={timeframe} onChange={setTimeframe} />
         <div className="w-px h-4 flex-shrink-0" style={{ backgroundColor: '#2a2e39' }} />
+        {/* Pre/Post market toggle — only shown for intraday timeframes */}
+        {intradayTimeframes.includes(timeframe) && (
+          <button
+            onClick={() => setShowPrePost((v) => !v)}
+            title="Toggle pre-market and after-hours candles"
+            className="text-[11px] font-medium px-2 py-0.5 rounded transition-colors"
+            style={{
+              backgroundColor: prepostActive ? '#f59e0b22' : 'transparent',
+              color: prepostActive ? '#f59e0b' : '#4c525e',
+              border: `1px solid ${prepostActive ? '#f59e0b55' : '#2a2e39'}`,
+            }}
+          >
+            EXT
+          </button>
+        )}
+        <div className="w-px h-4 flex-shrink-0" style={{ backgroundColor: '#2a2e39' }} />
         <IndicatorPanel settings={indicators} onChange={setIndicators} meta={meta} />
       </div>
 
@@ -261,6 +281,7 @@ export default function StockChart({ stock, liveCandle, isLive, chartType, activ
             alerts={tickerAlerts}
             onAlertAdd={(price) => onAlertAdd(stock.ticker, price)}
             onAlertTriggered={onAlertTriggered}
+            prepost={prepostActive}
           />
         )}
 

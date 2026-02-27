@@ -34,6 +34,8 @@ interface Props {
   alerts: PriceAlert[];
   onAlertAdd: (price: number) => void;
   onAlertTriggered: (id: string) => void;
+  /** When true, extended-hours candles are present and should be styled differently */
+  prepost: boolean;
 }
 
 // ── Drawing overlay types ─────────────────────────────────────────────────────
@@ -513,7 +515,7 @@ function drawAll(
 const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
   {
     candles, indicators, timeframe, chartType, activeTool, onToolChange, liveCandle,
-    spyCandles, earningsDates, meta, alerts, onAlertAdd, onAlertTriggered,
+    spyCandles, earningsDates, meta, alerts, onAlertAdd, onAlertTriggered, prepost,
   },
   ref,
 ) {
@@ -725,9 +727,20 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
     // ── Main price series ────────────────────────────────────────────────────
     let mainSeries: ISeriesApi<SeriesType>;
 
+    // Helper: per-bar extended-hours color override
+    const extColor    = 'rgba(120,123,134,0.55)';
+    const extWick     = 'rgba(120,123,134,0.35)';
+    const isExtCandle = (c: Candle) => prepost && c.session !== 'regular' && c.session !== undefined;
+
     if (chartType === 'bar') {
       const s = chart.addSeries(BarSeries, { upColor: '#26a69a', downColor: '#ef5350' });
-      s.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close })));
+      s.setData(candles.map((c) => {
+        if (isExtCandle(c)) {
+          return { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close,
+            color: extColor };
+        }
+        return { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close };
+      }));
       mainSeries = s;
     } else if (chartType === 'line') {
       const s = chart.addSeries(LineSeries, { color: '#2962ff', lineWidth: 2, priceLineVisible: true, lastValueVisible: true });
@@ -756,7 +769,16 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
         borderUpColor: '#26a69a', borderDownColor: '#ef5350',
         wickUpColor: '#26a69a', wickDownColor: '#ef5350',
       });
-      s.setData(candles.map((c) => ({ time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close })));
+      s.setData(candles.map((c) => {
+        if (isExtCandle(c)) {
+          return {
+            time: c.time as UTCTimestamp,
+            open: c.open, high: c.high, low: c.low, close: c.close,
+            color: extColor, borderColor: extColor, wickColor: extWick,
+          };
+        }
+        return { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close };
+      }));
       mainSeries = s;
     }
     seriesRefs.current['candle'] = mainSeries;
@@ -986,7 +1008,7 @@ const ChartPane = forwardRef<ChartActions, Props>(function ChartPane(
 
     return () => { ro.disconnect(); destroyCharts(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candles, indicators, timeframe, chartType, meta, spyCandles, destroyCharts]);
+  }, [candles, indicators, timeframe, chartType, meta, spyCandles, prepost, destroyCharts]);
 
   // ── Live candle update ───────────────────────────────────────────────────────
   useEffect(() => {
