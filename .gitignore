@@ -31,3 +31,4 @@ __pycache__/
 .env
 .vercel
 BlueChipTracker-win-x64.zip
+.env.prod

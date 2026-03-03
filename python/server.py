@@ -92,6 +92,210 @@ TIMEFRAME_MAP = {
     "ALL": ("max",  "1mo"),
 }
 
+# ─── S&P 500 Screener universe (~150 liquid names, all 11 GICS sectors) ────────
+
+SP500_SCREENER_UNIVERSE: list[str] = [
+    # Technology
+    "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ORCL", "CRM", "NOW", "ADBE", "INTC",
+    "QCOM", "TXN", "IBM", "HPQ", "ANET", "PANW", "SNPS", "CDNS", "KLAC", "LRCX",
+    "AMAT", "MU", "STX", "WDC", "FTNT", "CTSH",
+    # Communication Services
+    "GOOGL", "META", "NFLX", "DIS", "CMCSA", "VZ", "T", "TMUS", "CHTR", "TTWO",
+    "EA", "OMC", "IPG",
+    # Consumer Discretionary
+    "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW", "BKNG", "ABNB",
+    "CMG", "YUM", "MAR", "HLT", "F", "GM", "APTV", "GRMN",
+    # Consumer Staples
+    "WMT", "PG", "COST", "KO", "PEP", "PM", "MO", "MDLZ", "CL", "GIS",
+    "KHC", "STZ", "SYY", "ADM",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "PSX", "VLO", "MPC", "OXY", "KMI",
+    "WMB", "HAL",
+    # Financials
+    "BRK-B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "SCHW",
+    "AXP", "USB", "PNC", "TFC", "COF", "CB", "MMC", "AON", "ICE", "CME",
+    "MCO", "SPGI",
+    # Healthcare
+    "UNH", "LLY", "JNJ", "MRK", "ABBV", "PFE", "TMO", "ABT", "DHR", "BMY",
+    "AMGN", "GILD", "ISRG", "SYK", "MDT", "BSX", "ZTS", "REGN", "VRTX", "HCA",
+    "CI", "ELV", "CVS", "MCK", "ABC",
+    # Industrials
+    "GE", "CAT", "DE", "HON", "RTX", "LMT", "BA", "NOC", "GD", "UPS",
+    "FDX", "CSX", "NSC", "UNP", "EMR", "ETN", "PH", "ROK", "IR", "DOV",
+    "AME", "IEX", "CTAS", "RSG",
+    # Materials
+    "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "NUE", "VMC", "MLM", "PPG",
+    "ALB",
+    # Real Estate
+    "PLD", "AMT", "EQIX", "CCI", "PSA", "O", "WELL", "SPG", "VICI",
+    # Utilities
+    "NEE", "DUK", "SO", "D", "AEP", "EXC", "XEL", "PCG", "ED",
+]
+
+# ─── Screener cache ────────────────────────────────────────────────────────────
+
+_screener_cache: Optional[tuple[float, list]] = None   # (monotonic_ts, results)
+_screener_running: bool = False
+_SCREENER_TTL: float = 4 * 3600.0   # 4 hours
+
+
+def _compute_bollinger_touch(ticker: str, window: int = 20, std_mult: float = 2.0, lookback: int = 10) -> Optional[int]:
+    """
+    Return how many trading days ago the close last crossed below the lower
+    Bollinger Band (20-day, 2σ), or None if it never did in the last `lookback` days.
+    Fetches 60d of daily closes.
+    """
+    try:
+        df = yf.download(ticker, period="60d", interval="1d", auto_adjust=True, progress=False)
+        if df is None or df.empty or len(df) < window + lookback:
+            return None
+        # yf.download for a single ticker may return a MultiIndex DataFrame
+        close_col = df["Close"]
+        if hasattr(close_col, "iloc") and hasattr(close_col, "columns"):
+            # MultiIndex — take first column
+            close_col = close_col.iloc[:, 0]  # type: ignore[assignment]
+        closes: pd.Series = pd.Series(close_col.dropna().values, dtype=float)  # type: ignore[arg-type]
+        if len(closes) < window + lookback:
+            return None
+        sma   = closes.rolling(window).mean()
+        std   = closes.rolling(window).std()
+        lower = sma - std_mult * std
+        # Scan the last `lookback` bars from newest to oldest
+        for i in range(len(closes) - 1, len(closes) - 1 - lookback, -1):
+            if i < 0:
+                break
+            c_val = float(closes.iloc[i])
+            l_val = float(lower.iloc[i])  # type: ignore[index]
+            if not pd.isna(l_val) and c_val <= l_val:
+                return len(closes) - 1 - i
+        return None
+    except Exception:
+        return None
+
+
+def _run_screener_sync() -> list:
+    """
+    Scan SP500_SCREENER_UNIVERSE and return up to 10 stocks that pass:
+      1. EPS estimate for current quarter increased vs 30 days ago (earnings_trend)
+      2. EV/EBITDA (trailing) <= 20x
+      3. Price crossed below lower 20-day Bollinger Band within last 10 trading days
+
+    Results are sorted descending by Rule of 40 (revenue_growth% + operating_margin%).
+    Runs in a thread-pool executor; one bad ticker never fails the whole run.
+    """
+    global _screener_running, _screener_cache
+    _screener_running = True
+    logger.info(f"Screener: starting run over {len(SP500_SCREENER_UNIVERSE)} tickers")
+
+    passed: list[dict] = []
+
+    for ticker in SP500_SCREENER_UNIVERSE:
+        try:
+            t = yf.Ticker(ticker)
+            info: dict = t.info or {}
+
+            # ── Filter 1: EPS estimate revision ─────────────────────────────
+            eps_revision_pct: Optional[float] = None
+            try:
+                # yfinance exposes earnings trend as a property/attribute
+                raw_trend = getattr(t, "earnings_trend", None)  # type: ignore[attr-defined]
+                if raw_trend is None:
+                    # Fallback: try get_earnings_trend if available on this yfinance version
+                    get_fn = getattr(t, "get_earnings_trend", None)
+                    if callable(get_fn):
+                        raw_trend = get_fn()
+                if raw_trend is not None:
+                    # May be a dict with key 'trend', or a DataFrame directly
+                    if isinstance(raw_trend, dict):
+                        trend_list = raw_trend.get("trend", [])
+                    elif hasattr(raw_trend, "to_dict"):
+                        trend_list = raw_trend.to_dict("records")  # type: ignore[union-attr]
+                    else:
+                        trend_list = []
+                    # Find the '0q' (current quarter) entry
+                    cur_entry: Optional[dict] = None
+                    for entry in trend_list:
+                        if isinstance(entry, dict) and entry.get("period") in ("0q", "0Q"):
+                            cur_entry = entry
+                            break
+                    if cur_entry is None and trend_list:
+                        cur_entry = trend_list[0] if isinstance(trend_list[0], dict) else None
+                    if cur_entry is not None:
+                        est_block = cur_entry.get("earningsEstimate", {}) or {}
+                        est_now = est_block.get("current", {})
+                        est_30d = est_block.get("30daysAgo", {})
+                        # Yahoo returns these as {"raw": float, "fmt": str} dicts
+                        if isinstance(est_now, dict):
+                            est_now = est_now.get("raw")
+                        if isinstance(est_30d, dict):
+                            est_30d = est_30d.get("raw")
+                        if (
+                            est_now is not None and est_30d is not None
+                            and not pd.isna(float(est_now)) and not pd.isna(float(est_30d))
+                            and float(est_30d) != 0
+                        ):
+                            eps_revision_pct = round(
+                                (float(est_now) - float(est_30d)) / abs(float(est_30d)) * 100, 2
+                            )
+            except Exception:
+                pass
+
+            if eps_revision_pct is None or eps_revision_pct <= 0:
+                continue
+
+            # ── Filter 2: EV/EBITDA <= 20x ──────────────────────────────────
+            ev_ebitda = info.get("enterpriseToEbitda")
+            if ev_ebitda is None or pd.isna(ev_ebitda):
+                continue
+            ev_ebitda = float(ev_ebitda)
+            if ev_ebitda <= 0 or ev_ebitda > 20:
+                continue
+
+            # ── Filter 3: Bollinger Band lower-band touch ────────────────────
+            bb_days_ago = _compute_bollinger_touch(ticker)
+            if bb_days_ago is None:
+                continue
+
+            # ── Rule of 40 score ────────────────────────────────────────────
+            rev_growth      = info.get("revenueGrowth")
+            op_margin       = info.get("operatingMargins")
+            rev_growth_pct  = round(float(rev_growth) * 100, 2) if rev_growth is not None and not pd.isna(rev_growth) else 0.0
+            op_margin_pct   = round(float(op_margin)  * 100, 2) if op_margin  is not None and not pd.isna(op_margin)  else 0.0
+            rule_of_40      = round(rev_growth_pct + op_margin_pct, 2)
+
+            # ── Price / name ─────────────────────────────────────────────────
+            price     = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose") or 0.0
+            long_name = info.get("longName") or info.get("shortName") or ticker
+            sector    = info.get("sector") or "Unknown"
+
+            passed.append({
+                "ticker":           ticker,
+                "name":             long_name,
+                "sector":           sector,
+                "price":            round(float(price), 2),
+                "eps_revision_pct": eps_revision_pct,
+                "ev_ebitda":        round(ev_ebitda, 2),
+                "revenue_growth":   rev_growth_pct,
+                "operating_margin": op_margin_pct,
+                "rule_of_40":       rule_of_40,
+                "bb_touch_days_ago": bb_days_ago,
+            })
+            logger.info(f"Screener pass: {ticker}  R40={rule_of_40}  EV/EBITDA={ev_ebitda:.1f}  BB={bb_days_ago}d  EPSrev={eps_revision_pct:.1f}%")
+
+        except Exception as e:
+            logger.warning(f"Screener: skipping {ticker} — {e}")
+
+    # Sort by Rule of 40 descending, keep top 10
+    passed.sort(key=lambda x: x["rule_of_40"], reverse=True)
+    results = passed[:10]
+
+    ts = time.monotonic()
+    _screener_cache = (ts, results)
+    _screener_running = False
+    logger.info(f"Screener: done — {len(passed)} passed, returning top {len(results)}")
+    return results
+
+
 # ─── Alert configuration ──────────────────────────────────────────────────────
 
 DISCORD_WEBHOOK_URL: Optional[str] = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -671,6 +875,9 @@ async def startup_event() -> None:
     asyncio.create_task(_alert_loop())
     asyncio.create_task(_daily_close_loop())
     asyncio.create_task(_hourly_movers_loop())
+    # Kick off the screener in the background so first request is instant
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(_executor, _run_screener_sync)
 
 
 # ─── API Endpoints ────────────────────────────────────────────────────────────
@@ -1221,6 +1428,55 @@ def get_single_quote(ticker: str):
     except Exception as e:
         logger.warning(f"/quote/{ticker} error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── S&P 500 Quality Screener endpoint ───────────────────────────────────────
+
+@app.get("/screener/sp500-quality")
+async def get_screener(refresh: bool = Query(False, description="Force re-run even if cache is fresh")) -> dict:
+    """
+    Return top-10 S&P 500 stocks passing:
+      1. EPS estimate for current quarter raised vs 30 days ago
+      2. Trailing EV/EBITDA <= 20x
+      3. Close crossed below lower 20-day Bollinger Band within last 10 trading days
+    Sorted by Rule of 40 (revenue growth % + operating margin %) descending.
+
+    Results are pre-computed on server startup and cached for 4 hours.
+    Pass ?refresh=true to force an immediate re-run.
+    Returns {"status": "computing", "results": [], "generated_at": null} while still running.
+    """
+    global _screener_running, _screener_cache
+
+    now_mono = time.monotonic()
+
+    # Honour refresh=true: re-run if not already running
+    if refresh and not _screener_running:
+        _screener_cache = None
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(_executor, _run_screener_sync)
+
+    # Cache is stale / expired — kick off a fresh run if not already running
+    cache_stale = (
+        _screener_cache is None
+        or (now_mono - _screener_cache[0]) >= _SCREENER_TTL
+    )
+    if cache_stale and not _screener_running:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(_executor, _run_screener_sync)
+
+    # Still computing (first run or refresh)
+    if _screener_running and _screener_cache is None:
+        return {"status": "computing", "results": [], "generated_at": None}
+
+    # Return whatever we have (may be stale while refresh runs in background)
+    ts, results = _screener_cache if _screener_cache is not None else (0.0, [])
+    # Convert monotonic ts → wall clock unix ts
+    wall_ts = int(time.time() - (now_mono - ts))
+    return {
+        "status":       "computing" if (_screener_running and refresh) else "ready",
+        "results":      results,
+        "generated_at": wall_ts,
+    }
 
 
 if __name__ == "__main__":

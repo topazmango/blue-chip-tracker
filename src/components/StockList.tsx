@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import type { StockInfo, SearchResult } from '../types';
 import StockCard from './StockCard';
-import { Search, AlertCircle, Plus, X, Loader2 } from 'lucide-react';
+import { Search, AlertCircle, Plus, X, Loader2, SlidersHorizontal } from 'lucide-react';
 import { useTickerSearch, useSignals } from '../hooks/useStockData';
 
 interface Props {
@@ -15,6 +15,7 @@ interface Props {
   onAddStock: (stock: SearchResult) => void;
   onRemoveStock: (ticker: string) => void;
   customTickers: string[];
+  onOpenScreener: () => void;
 }
 
 export default function StockList({
@@ -26,6 +27,7 @@ export default function StockList({
   onAddStock,
   onRemoveStock,
   customTickers,
+  onOpenScreener,
 }: Props) {
   const [filterQuery, setFilterQuery] = useState('');
   const [sortBy, setSortBy] = useState<'default' | 'change' | 'price'>('default');
@@ -212,6 +214,22 @@ export default function StockList({
             }}
           >
             <Plus size={12} />
+          </button>
+          <button
+            onClick={onOpenScreener}
+            title="S&P 500 Quality Screener"
+            className="flex items-center justify-center w-6 h-6 rounded flex-shrink-0 transition-colors"
+            style={{ backgroundColor: '#1e222d', border: '1px solid #2a2e39', color: '#787b86' }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = '#f59e0b';
+              e.currentTarget.style.color = '#f59e0b';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = '#2a2e39';
+              e.currentTarget.style.color = '#787b86';
+            }}
+          >
+            <SlidersHorizontal size={12} />
           </button>
         </div>
       )}

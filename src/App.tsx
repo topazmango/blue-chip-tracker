@@ -5,6 +5,7 @@ import StockChart from './components/StockChart';
 import TitleBar from './components/TitleBar';
 import DrawingToolbar from './components/DrawingToolbar';
 import ChartToolbar from './components/ChartToolbar';
+import ScreenerDrawer from './components/ScreenerDrawer';
 import type { StockInfo, ChartType, DrawingTool, ChartActions, PriceAlert, SearchResult } from './types';
 
 export default function App() {
@@ -12,6 +13,7 @@ export default function App() {
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [screenerOpen, setScreenerOpen] = useState(false);
 
   const [chartType, setChartType]   = useState<ChartType>('candlestick');
   const [activeTool, setActiveTool] = useState<DrawingTool>('cursor');
@@ -136,6 +138,7 @@ export default function App() {
           onAddStock={handleAddStock}
           onRemoveStock={handleRemoveStock}
           customTickers={customTickers}
+          onOpenScreener={() => setScreenerOpen(true)}
         />
         <DrawingToolbar
           activeTool={activeTool}
@@ -160,6 +163,12 @@ export default function App() {
           chartActionsRef={chartActionsRef}
         />
       </div>
+
+      <ScreenerDrawer
+        open={screenerOpen}
+        onClose={() => setScreenerOpen(false)}
+        onSelectTicker={setSelectedTicker}
+      />
     </div>
   );
 }

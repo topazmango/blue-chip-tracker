@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta, SearchResult, TickerSignal, BacktestReport } from '../types';
+import type { StockInfo, HistoryResponse, Timeframe, QuoteData, EarningDate, StockMeta, SearchResult, TickerSignal, BacktestReport, ScreenerResponse } from '../types';
 
 // Electron: window.electronAPI present → local Python server
 // Web (Vercel): VITE_API_URL env var set to Railway URL
@@ -364,4 +364,65 @@ export function useBacktest(strategy: 'momentum' | 'mean_rev' | 'both') {
   }, []);
 
   return { report, loading, error, run };
+}
+
+/**
+ * Fetches GET /screener/sp500-quality on mount.
+ * If the server is still computing results (first startup run), polls every 10s until ready.
+ * Call `refresh()` to force the server to re-run the screener.
+ */
+export function useScreener() {
+  const [data, setData] = useState<ScreenerResponse>({ status: 'computing', results: [], generated_at: null });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const fetchScreener = useCallback(async (forceRefresh = false) => {
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    try {
+      const qs = forceRefresh ? '?refresh=true' : '';
+      const res = await fetch(`${API_BASE}/screener/sp500-quality${qs}`, {
+        signal: abortRef.current.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body: ScreenerResponse = await res.json();
+      setData(body);
+      setError(null);
+
+      // If still computing, start polling every 10s
+      if (body.status === 'computing') {
+        if (!timerRef.current) {
+          timerRef.current = setInterval(() => { fetchScreener(false); }, 10_000);
+        }
+      } else {
+        // Ready — stop polling
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      setError(e instanceof Error ? e.message : 'Failed to fetch screener');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchScreener(false);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      abortRef.current?.abort();
+    };
+  }, [fetchScreener]);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    fetchScreener(true);
+  }, [fetchScreener]);
+
+  return { data, loading, error, refresh };
 }

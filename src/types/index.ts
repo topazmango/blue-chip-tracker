@@ -117,6 +117,35 @@ export interface SearchResult {
   price: number;
 }
 
+/** One result row returned by GET /screener/sp500-quality */
+export interface ScreenerResult {
+  ticker: string;
+  name: string;
+  sector: string;
+  price: number;
+  /** % change in current-quarter EPS consensus vs 30 days ago */
+  eps_revision_pct: number;
+  /** Trailing EV/EBITDA multiple */
+  ev_ebitda: number;
+  /** TTM revenue growth, as a percentage (e.g. 12.5 = 12.5%) */
+  revenue_growth: number;
+  /** TTM operating margin, as a percentage (e.g. 28.0 = 28%) */
+  operating_margin: number;
+  /** Rule of 40 score = revenue_growth + operating_margin */
+  rule_of_40: number;
+  /** How many trading days ago price last closed below lower 20-day Bollinger Band */
+  bb_touch_days_ago: number;
+}
+
+/** Response shape of GET /screener/sp500-quality */
+export interface ScreenerResponse {
+  /** 'computing' while the background job is still running; 'ready' once results are available */
+  status: 'ready' | 'computing';
+  results: ScreenerResult[];
+  /** Unix timestamp (seconds) when the cache was last populated; null while first run is in progress */
+  generated_at: number | null;
+}
+
 // ── Quant model types ─────────────────────────────────────────────────────────
 
 export type SignalValue = 'BUY' | 'SELL' | 'NEUTRAL';
